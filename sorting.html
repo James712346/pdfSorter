@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PDF QR Sorter</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://unpkg.com/pdf-lib"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="sorting.js"></script> <!-- Your WASM module -->
+</head>
+<body class="container my-4">
+
+<h1>PDF Sorter using WASM</h1>
+
+<input type="file" id="fileInput" accept="application/pdf" class="form-control mb-3" />
+<div id="output" class="mb-3"></div>
+<div id="downloads" class="mb-4"></div>
+<div id="carouselGrid" class="row g-4"></div>
+<!-- Image Preview Modal -->
+<div class="modal fade" id="imagePreviewModal" tabindex="-1" aria-labelledby="imagePreviewLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+      <div class="modal-header">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    <div class="modal-content">
+      <div class="modal-body p-0">
+        <img id="previewImage" class="img-fluid w-100" style="object-fit: contain;" />
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let originalPdfBytes = null;
+let wasmModule = null;
+const images = [];
+
+function UTF8ToString(mod, ptr) {
+  const memory = mod.HEAPU8;
+  let endPtr = ptr;
+  while(memory[endPtr] !== 0) endPtr++;
+  return new TextDecoder('utf8').decode(memory.subarray(ptr, endPtr));
+}
+
+async function splitPdfAndCreateDownloads(sortedPages) {
+  const zip = new JSZip();
+  const pdfDoc = await PDFLib.PDFDocument.load(originalPdfBytes);
+  const numPages = pdfDoc.getPageCount();
+  const downloadsDiv = document.getElementById('downloads');
+  const carouselGrid = document.getElementById('carouselGrid');
+
+  downloadsDiv.innerHTML = '';
+  carouselGrid.innerHTML = '';
+
+  for (const docName in sortedPages) {
+    if (docName === "Error") continue;
+
+    const pagesData = sortedPages[docName];
+    pagesData.sort((a,b) => a.pageno - b.pageno);
+
+    const newPdfDoc = await PDFLib.PDFDocument.create();
+    const docImages = [];
+
+    for (const p of pagesData) {
+      if (p.foundpage >= numPages) continue;
+      const [copiedPage] = await newPdfDoc.copyPages(pdfDoc, [p.foundpage]);
+      newPdfDoc.addPage(copiedPage);
+      docImages.push(images[p.foundpage]);
+    }
+
+    const pdfBytes = await newPdfDoc.save();
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    zip.file(`${docName}.pdf`, blob);
+
+    const col = document.createElement('div');
+    col.className = 'col-md-6 col-lg-4';
+
+    const carouselId = `carousel-${docName}`;
+    const indicators = docImages.map((_, idx) =>
+      `<button type="button" data-bs-target="#${carouselId}" data-bs-slide-to="${idx}" ${idx === 0 ? 'class="active"' : ''}></button>`
+    ).join("");
+
+    const slides = docImages.map((src, idx) =>
+      `<div class="carousel-item ${idx === 0 ? 'active' : ''}">
+        <img src="${src}" class="d-block w-100" style="max-height: 300px; object-fit: contain;">
+      </div>`
+    ).join("");
+
+    col.innerHTML = `
+      <div class="card h-100">
+        <div id="${carouselId}" class="carousel slide" data-bs-ride="carousel">
+          <div class="carousel-indicators">${indicators}</div>
+          <div class="carousel-inner">${slides}</div>
+          <button class="carousel-control-prev" type="button" data-bs-target="#${carouselId}" data-bs-slide="prev">
+            <span class="carousel-control-prev-icon"></span>
+          </button>
+          <button class="carousel-control-next" type="button" data-bs-target="#${carouselId}" data-bs-slide="next">
+            <span class="carousel-control-next-icon"></span>
+          </button>
+        </div>
+        <div class="card-body text-center">
+          <h5 class="card-title">${docName}</h5>
+          <a class="btn btn-primary" download="${docName}.pdf" href="${URL.createObjectURL(blob)}">Download PDF</a>
+        </div>
+      </div>`;
+
+    carouselGrid.appendChild(col);
+  }
+
+  zip.generateAsync({ type: "blob" }).then((blob) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = "sorted_pdfs.zip";
+    a.className = "btn btn-success mb-3";
+    a.textContent = "Download All Files";
+    downloadsDiv.appendChild(a);
+  });
+}
+
+function showImageModal(imageSrc) {
+  const preview = document.getElementById('previewImage');
+  preview.src = imageSrc;
+  const modal = new bootstrap.Modal(document.getElementById('imagePreviewModal'));
+  modal.show();
+}
+
+function assignPageToGroup(page, groupName, insertAtPageNumber = null) {
+  if (!sortedPages[groupName]) {
+    sortedPages[groupName] = [];
+  }
+
+  // If user gave a position, insert it there
+  if (insertAtPageNumber && insertAtPageNumber > 0 && insertAtPageNumber <= sortedPages[groupName].length + 1) {
+    sortedPages[groupName].splice(insertAtPageNumber - 1, 0, page);
+  } else {
+    sortedPages[groupName].push(page);
+  }
+
+  renderManualAssignmentUI(); // Refresh
+}
+
+
+function renderManualAssignmentUI(errorPages, sortedPages) {
+  const output = document.getElementById('output');
+  const container = document.createElement('div');
+  container.className = 'mt-4';
+  container.innerHTML = `<h3>Unassigned Pages</h3>`;
+
+  const assignments = {};
+
+  errorPages.forEach((pageData, index) => {
+    const card = document.createElement('div');
+    card.className = 'card mb-3 bg-white text-dark';
+    card.innerHTML = `
+      <div class="row g-0">
+        <div class="col-md-4 text-center">
+            <img src="${images[pageData.foundpage]}" class="img-fluid rounded-start" style="max-height: 200px; object-fit: contain; cursor: zoom-in;" onclick="showImageModal('${images[pageData.foundpage]}')">
+        </div>
+        <div class="col-md-8">
+          <div class="card-body">
+            <h5 class="card-title">Page #${pageData.pageno}</h5>
+            <p class="card-text">No QR ID found. Assign to a document:</p>
+
+            <label>Select existing or create new:</label>
+            <select class="form-select mb-2" id="select-${index}">
+              <option value="">-- Select Document --</option>
+              ${Object.keys(sortedPages).map(name => `<option value="${name}">${name}</option>`).join('')}
+              <option value="_new">[Create New]</option>
+            </select>
+
+            <input type="text" id="input-${index}" class="form-control mb-2" placeholder="New document name" style="display:none;">
+            <input type="number" min="1" class="form-control mb-2" id="pageno-${index}" placeholder="Insert at page (optional)">
+
+            <button class="btn btn-sm btn-outline-primary" onclick="assignPage(${index})">Assign</button>
+          </div>
+        </div>
+      </div>
+    `;
+    container.appendChild(card);
+
+    const select = card.querySelector(`#select-${index}`);
+    const input = card.querySelector(`#input-${index}`);
+
+    select.addEventListener('change', () => {
+      input.style.display = (select.value === '_new') ? 'block' : 'none';
+    });
+  });
+
+  const rerunBtn = document.createElement('button');
+  rerunBtn.className = 'btn btn-success mt-3';
+  rerunBtn.textContent = 'Re-run Split with Manual Assignments';
+  rerunBtn.onclick = async () => {
+    for (const docName in assignments) {
+      if (!sortedPages[docName]) sortedPages[docName] = [];
+      sortedPages[docName].push(...assignments[docName]);
+    }
+    delete sortedPages["Error"];
+    await splitPdfAndCreateDownloads(sortedPages);
+    container.remove();
+  };
+
+  container.appendChild(rerunBtn);
+  output.appendChild(container);
+
+  window.assignPage = (index) => {
+    const select = document.getElementById(`select-${index}`);
+    const input = document.getElementById(`input-${index}`);
+    const pagenoInput = document.getElementById(`pageno-${index}`);
+
+    const docName = (select.value === '_new') ? input.value.trim() : select.value;
+    const insertPageNum = parseInt(pagenoInput.value);
+
+    if (!docName) {
+      alert("Please enter or select a document name.");
+      return;
+    }
+
+    if (!assignments[docName]) assignments[docName] = [];
+
+    const targetList = assignments[docName];
+    const page = errorPages[index];
+
+    if (insertPageNum > 0 && insertPageNum <= targetList.length + 1) {
+      targetList.splice(insertPageNum - 1, 0, page);
+    } else {
+      targetList.push(page);
+    }
+
+    select.disabled = true;
+    input.disabled = true;
+    pagenoInput.disabled = true;
+    select.nextElementSibling.nextElementSibling.nextElementSibling.disabled = true; // Disable Assign button
+    select.closest('.card').classList.add('border-success');
+  };
+}
+
+
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  originalPdfBytes = await file.arrayBuffer();
+  document.getElementById('output').textContent = 'Loading WASM module...';
+  wasmModule = await Module();
+
+  const pdf = await pdfjsLib.getDocument({ data: originalPdfBytes }).promise;
+  document.getElementById('output').textContent = 'Rendering pages...';
+
+  images.length = 0;
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 3.0 });
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const len = imgData.data.length;
+    const ptr = wasmModule._malloc(len);
+    wasmModule.HEAPU8.set(imgData.data, ptr);
+    wasmModule._add_image(ptr, canvas.width, canvas.height, i);
+    images.push(canvas.toDataURL());
+    wasmModule._free(ptr);
+  }
+
+  document.getElementById('output').textContent = 'Processing in WASM...';
+  const resultPtr = wasmModule._process_images();
+  const resultStr = UTF8ToString(wasmModule, resultPtr);
+  document.getElementById('output').textContent = `Done`;
+
+  let sortedPages;
+  try {
+    sortedPages = JSON.parse(resultStr);
+  } catch (e) {
+    console.error("JSON parse error:", e);
+    document.getElementById('output').textContent += "\n\nError parsing WASM JSON output.";
+    return;
+  }
+
+  originalPdfBytes = await file.arrayBuffer();
+  await splitPdfAndCreateDownloads(sortedPages);
+
+  if (sortedPages["Error"] && sortedPages["Error"].length > 0) {
+    renderManualAssignmentUI(sortedPages["Error"], sortedPages);
+  }
+
+  wasmModule._clear_images();
+});
+</script>
+</body>
+</html>
+
