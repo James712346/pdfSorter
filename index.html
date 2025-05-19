@@ -9,14 +9,14 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="sorting.js"></script> <!-- Your WASM module -->
 <style>
-  #guideOverlay {
+  .guide {
     position: fixed;
     top: 0; left: 0; bottom: 0; right: 0;
     background-color: rgba(0,0,0,0.4);
     display: none;
     z-index: 1050;
   }
-  #guideSidebar {
+  .guide div {
     position: fixed;
     top: 0;
     right: -500px;
@@ -29,7 +29,7 @@
     overflow-y: auto;
     padding: 20px;
   }
-  #guideSidebar.open {
+  .guide .open {
     right: 0;
   }
 .carousel-control-prev-icon, .carousel-control-next-icon {
@@ -40,21 +40,263 @@
 </head>
 <body class="container my-4">
 
-<h1>PDF Sorter using WASM</h1>
-<button class="btn btn-outline-info mb-3" onclick="toggleGuide(true)">📘 View Setup Guide </button>
+<h1>CBGU Doc Control PDF Sorter</h1>
+<button class="btn btn-outline-info mb-3" onclick="toggleGuide('guideScan',true)">📘 View Scan Guide </button>
+<button class="btn btn-outline-info mb-3" onclick="toggleGuide('guideDocs',true)">📘 View Word Docs Generation Guide </button>
 
-<div id="guideOverlay" onclick="toggleGuide(false)">
-  <div id="guideSidebar" onclick="event.stopPropagation()">
-    <h4>Setup Guide</h4>
+<div id="guideScan" class="guide" onclick="toggleGuide('guideScan',false)">
+  <div onclick="event.stopPropagation()">
+    <h4>Scan Guide</h4>
     <p>To ensure correct QR detection:</p>
     <ol>
-      <li>Select Photograph output in options</li>
+      <li>Select Photograph and colours option are set</li>
       <li>Use a resolution of 300 DPI.</li>
-      <li>Ensure QR codes are not cropped or blurry.</li>
+      <li>Ensure QR codes are not cropped, or covered</li>
     </ol>
+    <small>TODO: Will add Images for HP printers</small>
   </div>
 </div>
 
+<div id="guideDocs" class="guide" onclick="toggleGuide('guideDocs',false)">
+<div onclick="event.stopPropagation()">
+<h4>Document Creation Guide</h4>
+    
+    <p><strong>Adding QR Codes in Microsoft Word using DisplayBarcode</strong></p>
+    <ol>
+      <li>Open your Word document.</li>
+      <li>Place the cursor where you want the QR code.</li>
+      <li>Press <code>Ctrl + F9</code> to insert a field (you must use <code>Ctrl + F9</code> to get the special field brackets).</li>
+      <li>Type or paste something like this:<br>
+        <code>{ DISPLAYBARCODE "Your Data Here" QR \s 100 }</code>
+      </li>
+      <li>Right-click the field and choose <strong>Update Field</strong>.</li>
+    </ol>
+
+    <p>Use the generator below to create your field code with a title, optional prefix, custom date parts, and separator.</p>
+
+    <hr>
+
+    <h4>QR Code Field Generator</h4>
+
+<form id="qrForm" style="display: grid; gap: 12px;">
+
+  <label>
+    Prefix:<br>
+    <input type="text" id="prefix" placeholder="e.g., DOC" style="width: 100%;">
+  </label>
+
+  <label style="display: flex; align-items: center; gap: 6px;">
+    <input type="checkbox" id="useMerge" checked>
+    Use MERGEFIELD for title
+  </label>
+  <label>
+    Custom MERGEFIELD:<br>
+    <input type="text" id="custMerge" placeholder="documentid" style="width: 100%;">
+  </label>
+
+  <fieldset style="border: 1px solid #ccc; padding: 10px; border-radius: 6px;">
+    <legend style="padding: 0 5px;">Date Format Parts</legend>
+    
+    <label>
+      Day Format:<br>
+      <select id="dayFormat" style="width: 100%;">
+        <option value="dd">dd (two digits)</option>
+        <option value="d">d (one or two digits)</option>
+      </select>
+    </label>
+
+    <label>
+      Month Format:<br>
+      <select id="monthFormat" style="width: 100%;">
+        <option value="MM">MM (two digits)</option>
+        <option value="M">M (one or two digits)</option>
+      </select>
+    </label>
+
+    <label>
+      Year Format:<br>
+      <select id="yearFormat" style="width: 100%;">
+        <option value="yyyy">yyyy (four digits)</option>
+        <option value="yy">yy (two digits)</option>
+      </select>
+    </label>
+
+    <label>
+      Date Order:<br>
+      <select id="dateOrder" style="width: 100%;">
+        <option value="DMY">Day - Month - Year</option>
+        <option value="MDY">Month - Day - Year</option>
+        <option value="YMD">Year - Month - Day</option>
+        <option value="MY">Month - Year</option>
+        <option value="YM">Year - Month</option>
+        <option value="DY">Day - Year</option>
+        <option value="YD">Year - Day</option>
+        <option value="DM">Day - Month</option>
+        <option value="MD">Month - Day</option>
+        <option value="Y">Year</option>
+      </select>
+    </label>
+  </fieldset>
+
+  <label>
+    Separator:<br>
+    <input type="text" id="separator" value="-" maxlength="2" style="width: 60px;">
+  </label>
+
+  <label>
+    Barcode Size:<br>
+    <input type="range" id="sizeRange" min="10" max="400" value="100" style="width: 100%;">
+    <input type="number" id="sizeNumber" min="10" max="400" value="100" style="width: 80px; margin-top: 4px;">
+  </label>
+
+</form>
+
+    <h5 style="margin-top:20px;">Generated Word Field Code:</h5>
+    <span class="input-group" >
+        <input input="text" class="form-control" id="formoutput" disabled> </input>
+        <span class="input-group-append">
+            <button id="copyBtn" class="btn btn-outline-secondary" type="button">Copy</button>
+        </span>
+</span>
+
+
+    <h5>Preview of Final Barcode Value (Fake):</h5>
+    <pre id="preview" style="background:#e8ffe8; padding:10px; border-radius:4px; max-height:80px; overflow:auto;"></pre>
+
+    <script>
+        document.getElementById("copyBtn").addEventListener("click", () => {
+            const output = document.getElementById("formoutput").value;
+            navigator.clipboard.writeText(output).then(() => {
+                const btn = document.getElementById("copyBtn");
+                btn.textContent = "Copied!";
+                setTimeout(() => btn.textContent = "Copy", 1500);
+            }).catch(() => {
+                alert("Failed to copy. Try manually.");
+            });
+        });
+
+        function generate() {
+            const prefix = document.getElementById("prefix").value.trim();
+            const useMerge = document.getElementById("useMerge").checked;
+            const custMerge = document.getElementById("custMerge").value.trim();
+
+            const dayFmt = document.getElementById("dayFormat").value;
+            const monthFmt = document.getElementById("monthFormat").value;
+            const yearFmt = document.getElementById("yearFormat").value;
+            const order = document.getElementById("dateOrder").value;
+
+            const separator = document.getElementById("separator").value;
+            const size = parseInt(document.getElementById("sizeNumber").value, 10);
+
+            // Build date parts map for Word format and preview
+            const datePartsMap = {
+                D: { field: dayFmt, preview: formatDatePart(dayFmt) },
+                M: { field: monthFmt, preview: formatDatePart(monthFmt, true) },
+                Y: { field: yearFmt, preview: formatDatePart(yearFmt, false, true) }
+            };
+
+            // Helper to format preview date parts
+            function formatDatePart(fmt, isMonth=false, isYear=false) {
+                const now = new Date();
+                if (isYear) {
+                    if (fmt === "yyyy") return now.getFullYear();
+                    if (fmt === "yy") return String(now.getFullYear()).slice(2);
+                }
+                if (isMonth) {
+                    if (fmt === "MM") return String(now.getMonth() + 1).padStart(2, "0");
+                    if (fmt === "M") return String(now.getMonth() + 1);
+                }
+                // Day
+                if (fmt === "dd") return String(now.getDate()).padStart(2, "0");
+                if (fmt === "d") return String(now.getDate());
+                return "";
+            }
+
+            // Build date field string and preview string based on order
+            const dateFields = [];
+            const previewParts = [];
+
+            for (const part of order) {
+                if (datePartsMap[part]) {
+                    dateFields.push(datePartsMap[part].field);
+                    previewParts.push(datePartsMap[part].preview);
+                }
+            }
+
+            const dateFieldFormat = dateFields.join(separator);
+            const dateField = `{ DATE \\@ "${dateFieldFormat}" }`;
+            const fakeDate = previewParts.join(separator);
+
+            const titleField = useMerge ? `{ MERGEFIELD "Title" }` : '';
+            const fakeTitle = useMerge ? "SampleTitle" : '';
+
+            const mergeField = custMerge ? `{ MERGEFIELD "${custMerge}" }` : '';
+            const fakeMerge = custMerge ? custMerge : '';
+            const fieldParts = [];
+            const previewOut = [];
+
+            if (prefix) {
+                fieldParts.push(prefix);
+                previewOut.push(prefix);
+            }
+            if (titleField) {
+                fieldParts.push(titleField);
+                previewOut.push(fakeTitle);
+            }
+            if (mergeField){
+                fieldParts.push(mergeField);
+                previewOut.push(fakeMerge);
+            }
+            if (dateFieldFormat) {
+                fieldParts.push(dateField);
+                previewOut.push(fakeDate);
+            }
+
+            const content = fieldParts.join(separator);
+            const previewContent = previewOut.join(separator);
+
+            const field = `{ DISPLAYBARCODE "${content}" QR \\s ${size} }`;
+
+            document.getElementById("formoutput").value = field;
+            document.getElementById("preview").textContent = previewContent;
+        }
+
+        const sizeRange = document.getElementById("sizeRange");
+        const sizeNumber = document.getElementById("sizeNumber");
+
+        sizeRange.addEventListener("input", () => {
+            sizeNumber.value = sizeRange.value;
+            generate();
+        });
+        sizeNumber.addEventListener("input", () => {
+            let val = parseInt(sizeNumber.value, 10);
+            if (isNaN(val)) val = 10;
+            if (val < 10) val = 10;
+            if (val > 400) val = 400;
+            sizeNumber.value = val;
+            sizeRange.value = val;
+            generate();
+        });
+
+        const inputs = document.querySelectorAll("#guideDocs input");
+        inputs.forEach(input => input.addEventListener("input", () => {
+            generate();
+        }));
+        inputs.forEach(input => input.addEventListener("change", () => {
+            generate();
+        }));
+        const selects = document.querySelectorAll("#guideDocs select");
+        selects.forEach(input => input.addEventListener("select", () => {
+            generate();
+        }));
+        selects.forEach(input => input.addEventListener("change", () => {
+            generate();
+        }));
+        // Init
+        generate();
+    </script>    
+</div>
+</div>
 
 <input type="file" id="fileInput" accept="application/pdf" class="form-control mb-3" />
 <div id="output" class="mb-3"></div>
@@ -69,6 +311,12 @@
       </div>
       <div class="modal-body p-0">
         <img id="previewImage" class="img-fluid w-100" style="object-fit: contain;" />
+        <div id="errorCorrection" class="position-sticky bottom-0 bg-light p-3 border-top">
+            <div class="input-group">
+                <input type="text" class="form-control" id="correctionInput" placeholder="Type new name...">
+                <button class="btn btn-outline-primary" onclick="syncCorrectionInput()">Use</button>
+            </div>
+        </div>
       </div>
     </div>
   </div>
@@ -78,9 +326,9 @@
 let originalPdfBytes = null;
 let wasmModule = null;
 const images = [];
-function toggleGuide(show) {
-    const overlay = document.getElementById('guideOverlay');
-    const sidebar = document.getElementById('guideSidebar');
+function toggleGuide(id, show) {
+    const overlay = document.getElementById(id);
+    const sidebar = overlay.children[0];
     if (show) {
       overlay.style.display = 'block';
       setTimeout(() => sidebar.classList.add('open'), 10);
@@ -166,18 +414,34 @@ async function splitPdfAndCreateDownloads(sortedPages) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = "sorted_pdfs.zip";
+    a.style = "width:100%";
     a.className = "btn btn-success mb-3";
     a.textContent = "Download All Files";
     downloadsDiv.appendChild(a);
   });
 }
-
-function showImageModal(imageSrc) {
-  const preview = document.getElementById('previewImage');
-  preview.src = imageSrc;
+let activeIndex = null;
+function showImageModal(index,imageSrc) {
+  activeIndex = index;
+  const existingInput = document.getElementById(`input-${index}`);
+  document.getElementById("correctionInput").value = existingInput ? existingInput.value : '';
+  document.getElementById("previewImage").src = imageSrc;
   const modal = new bootstrap.Modal(document.getElementById('imagePreviewModal'));
   modal.show();
 }
+function syncCorrectionInput() {
+  const newValue = document.getElementById("correctionInput").value;
+
+    const inputEl = document.getElementById(`input-${activeIndex}`);
+    const selectEl = document.getElementById(`select-${activeIndex}`);
+
+  if (inputEl && selectEl) {
+    inputEl.value = newValue;
+    inputEl.style.display = 'block';     // Show the input (in case it's hidden)
+    selectEl.value = '_new';             // Mark select as "Create New"
+  }
+}
+
 
 function assignPageToGroup(page, groupName, insertAtPageNumber = null) {
   if (!sortedPages[groupName]) {
@@ -209,7 +473,7 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
     card.innerHTML = `
       <div class="row g-0">
         <div class="col-md-4 text-center">
-            <img src="${images[pageData.foundpage]}" class="img-fluid rounded-start" style="max-height: 200px; object-fit: contain; cursor: zoom-in;" onclick="showImageModal('${images[pageData.foundpage]}')">
+          <img src="${images[pageData.foundpage]}" class="img-fluid rounded-start" style="max-height: 200px; object-fit: contain; cursor: zoom-in;" onclick="showImageModal(${index},'${images[pageData.foundpage]}')">
         </div>
         <div class="col-md-8">
           <div class="card-body">
