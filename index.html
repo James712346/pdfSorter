@@ -19,9 +19,9 @@
   .guide div {
     position: fixed;
     top: 0;
-    right: -500px;
+    right: -700px;
     height: 100%;
-    width: 450px;
+    width: 650px;
     background: white;
     box-shadow: -2px 0 8px rgba(0,0,0,0.2);
     transition: right 0.3s ease-in-out;
@@ -31,6 +31,10 @@
   }
   .guide .open {
     right: 0;
+  }
+  .guide img{
+      width: 80%;
+      margin: 2px 10%;
   }
 .carousel-control-prev-icon, .carousel-control-next-icon {
     filter: invert(100%);
@@ -47,13 +51,16 @@
 <div id="guideScan" class="guide" onclick="toggleGuide('guideScan',false)">
   <div onclick="event.stopPropagation()">
     <h4>Scan Guide</h4>
-    <p>To ensure correct QR detection:</p>
-    <ol>
-      <li>Select Photograph and colours option are set</li>
-      <li>Use a resolution of 300 DPI.</li>
-      <li>Ensure QR codes are not cropped, or covered</li>
-    </ol>
-    <small>TODO: Will add Images for HP printers</small>
+    <p>To ensure correct QR detection open the option window in the email scanning page:</p>
+    <img src="image/selectOptions.png"></img>
+    <p> 1. Ensure a resolution of 300 DPI is set.</p>
+    <img src="image/firstSelect.png"></img>
+    <p> 2. Select Color Mode, and set it to Color</p>
+    <img src="image/secondSelect.png"></img>
+    <p> 3. Select the Optimize Text/Picture, and Select Photograph</p>
+    <img src="image/finalStep.png"></img>
+    <p> 4. When Scanning make sure QR codes are not cropped, or covered</p>
+    <p class="alert alert-warning">If there is an error with scanning the QR Code, you'd be able to mannually enter it in</p>
   </div>
 </div>
 
@@ -82,7 +89,7 @@
 
   <label>
     Prefix:<br>
-    <input type="text" id="prefix" placeholder="e.g., DOC" style="width: 100%;">
+    <input type="text" id="prefix" class="form-control" placeholder="e.g., DOC" style="width: 100%;">
   </label>
 
   <label style="display: flex; align-items: center; gap: 6px;">
@@ -91,7 +98,7 @@
   </label>
   <label>
     Custom MERGEFIELD:<br>
-    <input type="text" id="custMerge" placeholder="documentid" style="width: 100%;">
+    <input type="text" id="custMerge" placeholder="documentid" class="form-control" style="width: 100%;">
   </label>
 
   <fieldset style="border: 1px solid #ccc; padding: 10px; border-radius: 6px;">
@@ -99,7 +106,7 @@
     
     <label>
       Day Format:<br>
-      <select id="dayFormat" style="width: 100%;">
+      <select id="dayFormat" class="form-select" style="width: 100%;">
         <option value="dd">dd (two digits)</option>
         <option value="d">d (one or two digits)</option>
       </select>
@@ -107,7 +114,7 @@
 
     <label>
       Month Format:<br>
-      <select id="monthFormat" style="width: 100%;">
+      <select class="form-select" id="monthFormat" style="width: 100%;">
         <option value="MM">MM (two digits)</option>
         <option value="M">M (one or two digits)</option>
       </select>
@@ -115,7 +122,7 @@
 
     <label>
       Year Format:<br>
-      <select id="yearFormat" style="width: 100%;">
+      <select class="form-select" id="yearFormat" style="width: 100%;">
         <option value="yyyy">yyyy (four digits)</option>
         <option value="yy">yy (two digits)</option>
       </select>
@@ -123,7 +130,7 @@
 
     <label>
       Date Order:<br>
-      <select id="dateOrder" style="width: 100%;">
+      <select class="form-select" id="dateOrder" style="width: 100%;">
         <option value="DMY">Day - Month - Year</option>
         <option value="MDY">Month - Day - Year</option>
         <option value="YMD">Year - Month - Day</option>
@@ -140,13 +147,15 @@
 
   <label>
     Separator:<br>
-    <input type="text" id="separator" value="-" maxlength="2" style="width: 60px;">
+    <input type="text" id="separator" class="form-control" value="-" maxlength="2" style="width: 60px;">
   </label>
 
   <label>
     Barcode Size:<br>
-    <input type="range" id="sizeRange" min="10" max="400" value="100" style="width: 100%;">
-    <input type="number" id="sizeNumber" min="10" max="400" value="100" style="width: 80px; margin-top: 4px;">
+    <span style="display:flex;">
+        <input type="range" id="sizeRange" class="form-range" min="10" max="400" value="100" style="width: 85%;margin:auto">
+        <input type="number" id="sizeNumber" class="form-control" min="10" max="400" value="100" style="width: 15%; margin: 0 15px;">
+    </span>
   </label>
 
 </form>
@@ -513,6 +522,7 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
       if (!sortedPages[docName]) sortedPages[docName] = [];
       sortedPages[docName].push(...assignments[docName]);
     }
+    sortedPages["ErrorOld"] = sortedPages["Error"];
     delete sortedPages["Error"];
     await splitPdfAndCreateDownloads(sortedPages);
     container.remove();
