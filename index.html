@@ -592,6 +592,7 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
     wasmModule._add_image(ptr, canvas.width, canvas.height, i);
     images.push(canvas.toDataURL());
     wasmModule._free(ptr);
+    console.log(`Rendered Image ${i} of ${pdf.numPages}`);
   }
 
   document.getElementById('output').textContent = 'Processing in WASM...';

@@ -8,6 +8,7 @@
 
 struct PageData {
     int foundpage;
+    std::string type;
     int pageno;
 };
 
@@ -63,6 +64,7 @@ const char* process_images() {
                 } else {
                     pageData.pageno = DocumentsFound[data].size() + 1;
                 }
+                pageData.type = label;
                 DocumentsFound[data].push_back(pageData);
                 found = true;
                 break;
