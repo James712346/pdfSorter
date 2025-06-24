@@ -13,7 +13,7 @@ all:
 		$(OPENCV_CFLAGS) $(OPENCV_LIBS) \
 		-s EXPORTED_FUNCTIONS=$(EXPORTED_FUNCS) \
 		-s MODULARIZE=1 -s 'EXPORT_NAME="Module"' \
-		-s "EXPORTED_RUNTIME_METHODS=['UTF8ToString','stringToUTF8','lengthBytesUTF8']"\
+		-s "EXPORTED_RUNTIME_METHODS=['UTF8ToString','stringToUTF8','lengthBytesUTF8', 'HEAPU8']"\
 		-o $(OUT_JS)
 
 clean:
