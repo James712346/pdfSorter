@@ -30,10 +30,9 @@ const char* process_images() {
     for (int i = 0; i < images.size(); ++i) {
         const cv::Mat& image = images[i];
         int h = image.rows, w = image.cols;
-        int cropSizeH = h / 8;
+        int cropSizeH = h / 6;
         int cropSizeW = w / 2;
-        int cropSizeWW = w / 6;
-        int cropSizeSmall = w / 10;  // Smaller region for more precise edge searches
+        int cropSizeWW = w / 4;
 
         std::vector<std::pair<std::string, cv::Rect>> corners = {
             // Original corner regions (priority search)
@@ -57,8 +56,6 @@ const char* process_images() {
             {"bottom_middle",      cv::Rect(w/2 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
             {"bottom_left_quarter", cv::Rect(w/4 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
             {"bottom_right_quarter",cv::Rect(3*w/4 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
-            {"bottom_right_small", cv::Rect(w - cropSizeSmall, h - cropSizeH, cropSizeSmall, cropSizeH)},
-            {"bottom_left_small",  cv::Rect(0, h - cropSizeH, cropSizeSmall, cropSizeH)},
             
             // Left edge variations
             {"left_middle",        cv::Rect(0, h/2 - cropSizeH/2, cropSizeWW, cropSizeH)},
@@ -70,13 +67,6 @@ const char* process_images() {
             {"right_top_quarter",   cv::Rect(w - cropSizeWW, h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
             {"right_bottom_quarter",cv::Rect(w - cropSizeWW, 3*h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
             
-            // Small precise edge regions
-            {"top_left_small",    cv::Rect(0, 0, cropSizeSmall, cropSizeH)},
-            {"top_right_small",   cv::Rect(w - cropSizeSmall, 0, cropSizeSmall, cropSizeH)},
-            {"left_top_small",    cv::Rect(0, 0, cropSizeWW, cropSizeSmall)},
-            {"right_top_small",   cv::Rect(w - cropSizeWW, 0, cropSizeWW, cropSizeSmall)},
-            {"left_bottom_small", cv::Rect(0, h - cropSizeSmall, cropSizeWW, cropSizeSmall)},
-            {"right_bottom_small",cv::Rect(w - cropSizeWW, h - cropSizeSmall, cropSizeWW, cropSizeSmall)}
         };
         PageData pageData;
         pageData.foundpage = i;
