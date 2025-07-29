@@ -594,13 +594,12 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
     wasmModule._free(ptr);
     console.log(`Rendered Image ${i} of ${pdf.numPages}`);
   }
-  console.log('Starting WASM...');
+  console.log('Starting WASM v2...');
   document.getElementById('output').textContent = 'Processing in WASM...';
   const resultPtr = wasmModule._process_images();
   const resultStr = UTF8ToString(wasmModule, resultPtr);
   console.log('Done WASM!')
   document.getElementById('output').textContent = `Done`;
-
   let sortedPages;
   try {
     sortedPages = JSON.parse(resultStr);
