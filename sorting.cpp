@@ -33,20 +33,51 @@ const char* process_images() {
         int cropSizeH = h / 8;
         int cropSizeW = w / 2;
         int cropSizeWW = w / 6;
+        int cropSizeSmall = w / 10;  // Smaller region for more precise edge searches
 
         std::vector<std::pair<std::string, cv::Rect>> corners = {
+            // Original corner regions (priority search)
             {"top_left",     cv::Rect(0, 0, cropSizeW, cropSizeH)},
             {"bottom_right", cv::Rect(w - cropSizeW, h - cropSizeH, cropSizeW, cropSizeH)},
             {"top_right",    cv::Rect(w - cropSizeW, 0, cropSizeW, cropSizeH)},
             {"bottom_left",  cv::Rect(0, h - cropSizeH, cropSizeW, cropSizeH)},
-
             {"landscape_top_left",     cv::Rect(0, 0, cropSizeH, cropSizeW)},
             {"landscape_top_right",    cv::Rect(w - cropSizeH, 0, cropSizeH, cropSizeW)},
             {"landscape_bottom_left",  cv::Rect(0, h - cropSizeW, cropSizeH, cropSizeW)},
             {"landscape_bottom_right", cv::Rect(w - cropSizeH, h - cropSizeW, cropSizeH, cropSizeW)},
-            {"worest-bottom_right", cv::Rect(w - cropSizeWW, h - cropSizeH, cropSizeWW, cropSizeH)}
+            {"worst_bottom_right", cv::Rect(w - cropSizeWW, h - cropSizeH, cropSizeWW, cropSizeH)},
+            
+            // Additional edge regions (secondary search)
+            // Top edge variations
+            {"top_middle",        cv::Rect(w/2 - cropSizeWW/2, 0, cropSizeWW, cropSizeH)},
+            {"top_left_quarter",  cv::Rect(w/4 - cropSizeWW/2, 0, cropSizeWW, cropSizeH)},
+            {"top_right_quarter", cv::Rect(3*w/4 - cropSizeWW/2, 0, cropSizeWW, cropSizeH)},
+            
+            // Bottom edge variations (your specific need)
+            {"bottom_middle",      cv::Rect(w/2 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
+            {"bottom_left_quarter", cv::Rect(w/4 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
+            {"bottom_right_quarter",cv::Rect(3*w/4 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
+            {"bottom_right_small", cv::Rect(w - cropSizeSmall, h - cropSizeH, cropSizeSmall, cropSizeH)},
+            {"bottom_left_small",  cv::Rect(0, h - cropSizeH, cropSizeSmall, cropSizeH)},
+            
+            // Left edge variations
+            {"left_middle",        cv::Rect(0, h/2 - cropSizeH/2, cropSizeWW, cropSizeH)},
+            {"left_top_quarter",   cv::Rect(0, h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
+            {"left_bottom_quarter",cv::Rect(0, 3*h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
+            
+            // Right edge variations
+            {"right_middle",        cv::Rect(w - cropSizeWW, h/2 - cropSizeH/2, cropSizeWW, cropSizeH)},
+            {"right_top_quarter",   cv::Rect(w - cropSizeWW, h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
+            {"right_bottom_quarter",cv::Rect(w - cropSizeWW, 3*h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
+            
+            // Small precise edge regions
+            {"top_left_small",    cv::Rect(0, 0, cropSizeSmall, cropSizeH)},
+            {"top_right_small",   cv::Rect(w - cropSizeSmall, 0, cropSizeSmall, cropSizeH)},
+            {"left_top_small",    cv::Rect(0, 0, cropSizeWW, cropSizeSmall)},
+            {"right_top_small",   cv::Rect(w - cropSizeWW, 0, cropSizeWW, cropSizeSmall)},
+            {"left_bottom_small", cv::Rect(0, h - cropSizeSmall, cropSizeWW, cropSizeSmall)},
+            {"right_bottom_small",cv::Rect(w - cropSizeWW, h - cropSizeSmall, cropSizeWW, cropSizeSmall)}
         };
-
         PageData pageData;
         pageData.foundpage = i;
         cv::QRCodeDetector qrDetector;
