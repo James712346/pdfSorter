@@ -15,7 +15,7 @@ struct PageData {
 std::unordered_map<std::string, std::vector<PageData>> DocumentsFound;
 std::vector<cv::Mat> images;
 
-// Preprocessing function for better QR detection
+// Simplified preprocessing function
 cv::Mat preprocessForQR(const cv::Mat& input) {
     cv::Mat processed;
     
@@ -26,64 +26,44 @@ cv::Mat preprocessForQR(const cv::Mat& input) {
         processed = input.clone();
     }
     
-    // Apply Gaussian blur to reduce noise
+    // Light Gaussian blur to reduce noise
     cv::GaussianBlur(processed, processed, cv::Size(3, 3), 0);
     
-    // Adaptive thresholding for better contrast
-    cv::Mat binary;
-    cv::adaptiveThreshold(processed, binary, 255, 
-                         cv::ADAPTIVE_THRESH_GAUSSIAN_C, 
-                         cv::THRESH_BINARY, 11, 2);
-    
-    // Optional: Morphological operations to clean up
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2));
-    cv::morphologyEx(binary, binary, cv::MORPH_CLOSE, kernel);
-    
-    return binary;
+    return processed;
 }
 
-// Multi-scale QR detection
-std::pair<std::string, std::string> detectQRAtMultipleScales(const cv::Mat& image) {
+// Optimized sliding window QR detection - only top and bottom regions
+std::pair<std::string, std::string> optimizedSlidingWindowQRDetection(const cv::Mat& image) {
     cv::QRCodeDetector qrDetector;
+    int h = image.rows;
+    int w = image.cols;
     
-    // Try different scales
-    std::vector<double> scales = {1.0, 0.8, 0.6, 0.4, 0.3, 0.2};
+    // Define top and bottom regions (1/4 of image height each)
+    int regionHeight = h / 4;
+    std::vector<std::pair<std::string, cv::Rect>> regions = {
+        {"top_region", cv::Rect(0, 0, w, regionHeight)},
+        {"bottom_region", cv::Rect(0, h - regionHeight, w, regionHeight)}
+    };
     
-    for (double scale : scales) {
-        cv::Mat resized;
-        cv::resize(image, resized, cv::Size(), scale, scale);
+    // Try fewer, larger window sizes for efficiency
+    std::vector<int> windowSizes = {regionHeight/2, regionHeight/3};
+    
+    for (const auto& [regionName, regionRect] : regions) {
+        cv::Mat region = image(regionRect);
         
-        std::vector<cv::Point> points;
-        std::string data = qrDetector.detectAndDecode(resized, points);
-        
-        if (!data.empty()) {
-            std::string type = "scale_" + std::to_string(scale);
-            return std::make_pair(data, type);
-        }
-    }
-    return std::make_pair("", "");
-}
-
-// Sliding window QR detection
-std::pair<std::string, std::string> slidingWindowQRDetection(const cv::Mat& image) {
-    cv::QRCodeDetector qrDetector;
-    int minDim = std::min(image.rows, image.cols);
-    
-    // Try different window sizes
-    std::vector<int> windowSizes = {minDim/3, minDim/4, minDim/5, minDim/6};
-    
-    for (int windowSize : windowSizes) {
-        int step = windowSize / 3; // 33% overlap
-        
-        for (int y = 0; y <= image.rows - windowSize; y += step) {
-            for (int x = 0; x <= image.cols - windowSize; x += step) {
-                cv::Rect roi(x, y, windowSize, windowSize);
-                cv::Mat window = image(roi);
-                
-                std::string data = qrDetector.detectAndDecode(window);
-                if (!data.empty()) {
-                    std::string type = "sliding_window_" + std::to_string(windowSize);
-                    return std::make_pair(data, type);
+        for (int windowSize : windowSizes) {
+            int step = windowSize / 2; // 50% overlap for efficiency
+            
+            for (int y = 0; y <= region.rows - windowSize; y += step) {
+                for (int x = 0; x <= region.cols - windowSize; x += step) {
+                    cv::Rect roi(x, y, windowSize, windowSize);
+                    cv::Mat window = region(roi);
+                    
+                    std::string data = qrDetector.detectAndDecode(window);
+                    if (!data.empty()) {
+                        std::string type = regionName + "_window_" + std::to_string(windowSize);
+                        return std::make_pair(data, type);
+                    }
                 }
             }
         }
@@ -91,50 +71,18 @@ std::pair<std::string, std::string> slidingWindowQRDetection(const cv::Mat& imag
     return std::make_pair("", "");
 }
 
-// Enhanced corner detection with more regions
+// Simplified corner detection
 std::pair<std::string, std::string> detectQRInCorners(const cv::Mat& image) {
     cv::QRCodeDetector qrDetector;
     int h = image.rows, w = image.cols;
     int cropSizeH = h / 6;
-    int cropSizeW = w / 2;
-    int cropSizeWW = w / 4;
+    int cropSizeW = w / 4;
 
     std::vector<std::pair<std::string, cv::Rect>> corners = {
-        // Original corner regions (priority search)
         {"top_left",     cv::Rect(0, 0, cropSizeW, cropSizeH)},
-        {"bottom_right", cv::Rect(w - cropSizeW, h - cropSizeH, cropSizeW, cropSizeH)},
         {"top_right",    cv::Rect(w - cropSizeW, 0, cropSizeW, cropSizeH)},
         {"bottom_left",  cv::Rect(0, h - cropSizeH, cropSizeW, cropSizeH)},
-        {"landscape_top_left",     cv::Rect(0, 0, cropSizeH, cropSizeW)},
-        {"landscape_top_right",    cv::Rect(w - cropSizeH, 0, cropSizeH, cropSizeW)},
-        {"landscape_bottom_left",  cv::Rect(0, h - cropSizeW, cropSizeH, cropSizeW)},
-        {"landscape_bottom_right", cv::Rect(w - cropSizeH, h - cropSizeW, cropSizeH, cropSizeW)},
-        {"worst_bottom_right", cv::Rect(w - cropSizeWW, h - cropSizeH, cropSizeWW, cropSizeH)},
-        
-        // Additional edge regions (secondary search)
-        // Top edge variations
-        {"top_middle",        cv::Rect(w/2 - cropSizeWW/2, 0, cropSizeWW, cropSizeH)},
-        {"top_left_quarter",  cv::Rect(w/4 - cropSizeWW/2, 0, cropSizeWW, cropSizeH)},
-        {"top_right_quarter", cv::Rect(3*w/4 - cropSizeWW/2, 0, cropSizeWW, cropSizeH)},
-        
-        // Bottom edge variations
-        {"bottom_middle",      cv::Rect(w/2 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
-        {"bottom_left_quarter", cv::Rect(w/4 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
-        {"bottom_right_quarter",cv::Rect(3*w/4 - cropSizeWW/2, h - cropSizeH, cropSizeWW, cropSizeH)},
-        
-        // Left edge variations
-        {"left_middle",        cv::Rect(0, h/2 - cropSizeH/2, cropSizeWW, cropSizeH)},
-        {"left_top_quarter",   cv::Rect(0, h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
-        {"left_bottom_quarter",cv::Rect(0, 3*h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
-        
-        // Right edge variations
-        {"right_middle",        cv::Rect(w - cropSizeWW, h/2 - cropSizeH/2, cropSizeWW, cropSizeH)},
-        {"right_top_quarter",   cv::Rect(w - cropSizeWW, h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
-        {"right_bottom_quarter",cv::Rect(w - cropSizeWW, 3*h/4 - cropSizeH/2, cropSizeWW, cropSizeH)},
-        
-        // Center regions
-        {"center",             cv::Rect(w/2 - cropSizeWW/2, h/2 - cropSizeH/2, cropSizeWW, cropSizeH)},
-        {"center_large",       cv::Rect(w/2 - cropSizeW/4, h/2 - cropSizeH/2, cropSizeW/2, cropSizeH)},
+        {"bottom_right", cv::Rect(w - cropSizeW, h - cropSizeH, cropSizeW, cropSizeH)},
     };
 
     for (const auto& [label, roi] : corners) {
@@ -160,10 +108,8 @@ void add_image(uint8_t* data, int width, int height, int index) {
 }
 
 EMSCRIPTEN_KEEPALIVE
-const char* process_images() {
-    DocumentsFound.clear();
-
-    for (int i = 0; i < images.size(); ++i) {
+const char* process_images_with_progress(int startIndex, int endIndex) {
+    for (int i = startIndex; i < endIndex && i < images.size(); ++i) {
         const cv::Mat& image = images[i];
         cv::QRCodeDetector qrDetector;
         bool found = false;
@@ -172,37 +118,26 @@ const char* process_images() {
         std::string data;
         std::string detectionType;
 
-        // Method 1: Try full image with preprocessing
-        cv::Mat processed = preprocessForQR(image);
-        data = qrDetector.detectAndDecode(processed);
-        
+        // Method 1: Try full image directly
+        data = qrDetector.detectAndDecode(image);
         if (!data.empty()) {
-            detectionType = "full_image_processed";
+            detectionType = "full_image_raw";
             found = true;
         }
 
-        // Method 2: Try full image without preprocessing
+        // Method 2: Try full image with preprocessing
         if (!found) {
-            data = qrDetector.detectAndDecode(image);
+            cv::Mat processed = preprocessForQR(image);
+            data = qrDetector.detectAndDecode(processed);
             if (!data.empty()) {
-                detectionType = "full_image_raw";
+                detectionType = "full_image_processed";
                 found = true;
             }
         }
 
-        // Method 3: Multi-scale detection on processed image
+        // Method 3: Corner detection on original image
         if (!found) {
-            auto result = detectQRAtMultipleScales(processed);
-            if (!result.first.empty()) {
-                data = result.first;
-                detectionType = result.second + "_processed";
-                found = true;
-            }
-        }
-
-        // Method 4: Multi-scale detection on original image
-        if (!found) {
-            auto result = detectQRAtMultipleScales(image);
+            auto result = detectQRInCorners(image);
             if (!result.first.empty()) {
                 data = result.first;
                 detectionType = result.second + "_raw";
@@ -210,28 +145,9 @@ const char* process_images() {
             }
         }
 
-        // Method 5: Sliding window on processed image
+        // Method 4: Corner detection on processed image
         if (!found) {
-            auto result = slidingWindowQRDetection(processed);
-            if (!result.first.empty()) {
-                data = result.first;
-                detectionType = result.second + "_processed";
-                found = true;
-            }
-        }
-
-        // Method 6: Sliding window on original image
-        if (!found) {
-            auto result = slidingWindowQRDetection(image);
-            if (!result.first.empty()) {
-                data = result.first;
-                detectionType = result.second + "_raw";
-                found = true;
-            }
-        }
-
-        // Method 7: Corner detection on processed image
-        if (!found) {
+            cv::Mat processed = preprocessForQR(image);
             auto result = detectQRInCorners(processed);
             if (!result.first.empty()) {
                 data = result.first;
@@ -240,12 +156,23 @@ const char* process_images() {
             }
         }
 
-        // Method 8: Corner detection on original image (fallback to original method)
+        // Method 5: Optimized sliding window on original image
         if (!found) {
-            auto result = detectQRInCorners(image);
+            auto result = optimizedSlidingWindowQRDetection(image);
             if (!result.first.empty()) {
                 data = result.first;
                 detectionType = result.second + "_raw";
+                found = true;
+            }
+        }
+
+        // Method 6: Optimized sliding window on processed image
+        if (!found) {
+            cv::Mat processed = preprocessForQR(image);
+            auto result = optimizedSlidingWindowQRDetection(processed);
+            if (!result.first.empty()) {
+                data = result.first;
+                detectionType = result.second + "_processed";
                 found = true;
             }
         }
@@ -270,6 +197,15 @@ const char* process_images() {
         }
     }
 
+    // Return progress info as JSON
+    std::string progress = "{\"processed\":" + std::to_string(endIndex) + ",\"total\":" + std::to_string(images.size()) + "}";
+    static std::string progressOutput;
+    progressOutput = progress;
+    return progressOutput.c_str();
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char* get_final_results() {
     // Serialize results to JSON string
     std::string result = "{";
     for (auto it = DocumentsFound.begin(); it != DocumentsFound.end(); ++it) {
@@ -303,6 +239,11 @@ EMSCRIPTEN_KEEPALIVE
 void clear_images() {
     images.clear();
     DocumentsFound.clear();
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_total_images() {
+    return images.size();
 }
 
 } // extern "C"
