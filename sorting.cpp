@@ -52,7 +52,7 @@ std::pair<std::string, std::string> optimizedSlidingWindowQRDetection(const cv::
         cv::Mat region = image(regionRect);
         
         for (int windowSize : windowSizes) {
-            int step = windowSize / 2; // 50% overlap for efficiency
+            int step = windowSize / 4; // 50% overlap for efficiency
             
             for (int y = 0; y <= region.rows - windowSize; y += step) {
                 for (int x = 0; x <= region.cols - windowSize; x += step) {
