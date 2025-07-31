@@ -684,6 +684,8 @@ async function processingComplete() {
 
 async function splitPdfAndCreateDownloads(sortedPages) {
   const zip = new JSZip();
+  const file = document.getElementById('fileInput').files[0]
+  originalPdfBytes = await file.arrayBuffer();
   const pdfDoc = await PDFLib.PDFDocument.load(originalPdfBytes);
   const numPages = pdfDoc.getPageCount();
   const downloadsDiv = document.getElementById('downloads');
@@ -881,7 +883,7 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
   if (!file) return;
   
   try {
-    originalPdfBytes = new Uint8Array(await file.arrayBuffer());
+    originalPdfBytes = await file.arrayBuffer();
     showProgress();
     updateStatus('Initializing worker...');
     
