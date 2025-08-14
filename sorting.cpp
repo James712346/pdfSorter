@@ -14,6 +14,7 @@ struct PageData {
 
 std::unordered_map<std::string, std::vector<PageData>> DocumentsFound;
 std::vector<cv::Mat> images;
+int processedImageCount = 0; // Track how many images have been processed
 
 // Simplified preprocessing function
 cv::Mat preprocessForQR(const cv::Mat& input) {
@@ -46,7 +47,7 @@ std::pair<std::string, std::string> optimizedSlidingWindowQRDetection(const cv::
     };
     
     // Try fewer, larger window sizes for efficiency
-    std::vector<int> windowSizes = {regionHeight/2, regionHeight/3};
+    std::vector<int> windowSizes = {regionHeight/2, regionHeight/4};
     
     for (const auto& [regionName, regionRect] : regions) {
         cv::Mat region = image(regionRect);
@@ -195,6 +196,9 @@ const char* process_images_with_progress(int startIndex, int endIndex) {
             pageData.type = "not_found";
             DocumentsFound["Error"].push_back(pageData);
         }
+        
+        // Update processed count after each image
+        processedImageCount = i + 1;
     }
 
     // Return progress info as JSON
@@ -236,14 +240,56 @@ const char* get_final_results() {
 }
 
 EMSCRIPTEN_KEEPALIVE
+const char* get_partial_results() {
+    // Return current state of DocumentsFound along with progress info
+    std::string result = "{\"progress\":{";
+    result += "\"processedImages\":" + std::to_string(processedImageCount) + ",";
+    result += "\"totalImages\":" + std::to_string(images.size()) + ",";
+    result += "\"documentsFound\":" + std::to_string(DocumentsFound.size()) + "},";
+    result += "\"results\":{";
+    
+    for (auto it = DocumentsFound.begin(); it != DocumentsFound.end(); ++it) {
+        const std::string& key = it->first;
+        const std::vector<PageData>& vals = it->second;
+        
+        result += "\"" + key + "\":[";
+        for (size_t i = 0; i < vals.size(); ++i) {
+            result += "{\"foundpage\":" + std::to_string(vals[i].foundpage) +
+                      ",\"pageno\":" + std::to_string(vals[i].pageno) +
+                      ",\"type\":\"" + vals[i].type + "\"}";
+            if (i + 1 < vals.size()) result += ",";
+        }
+        result += "]";
+        
+        // Add comma if not the last element
+        auto next_it = it;
+        ++next_it;
+        if (next_it != DocumentsFound.end()) {
+            result += ",";
+        }
+    }
+    result += "}}";
+
+    static std::string partialOutput;
+    partialOutput = result;
+    return partialOutput.c_str();
+}
+
+EMSCRIPTEN_KEEPALIVE
 void clear_images() {
     images.clear();
     DocumentsFound.clear();
+    processedImageCount = 0; // Reset processed count
 }
 
 EMSCRIPTEN_KEEPALIVE
 int get_total_images() {
     return images.size();
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_processed_count() {
+    return processedImageCount;
 }
 
 } // extern "C"

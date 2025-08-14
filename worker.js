@@ -1,6 +1,5 @@
 // worker.js - Save this as a separate file
-// Only handle WASM operations in the worker
-
+// Enhanced worker with error recovery and individual page processing
 let wasmModule = null;
 
 function UTF8ToString(mod, ptr) {
@@ -40,25 +39,87 @@ self.onmessage = async function(e) {
       
       postMessage({ type: 'IMAGE_ADDED', index });
     } catch (error) {
-      postMessage({ type: 'ERROR', error: error.message });
+      postMessage({ type: 'ERROR', error: `Error adding image ${data.index}: ${error.message}` });
     }
   }
   
   else if (type === 'PROCESS_BATCH') {
     try {
-      const { startIndex, endIndex } = data;
+      const { startIndex, endIndex, skipList = [], individualMode = false } = data;
       
-      const progressPtr = wasmModule._process_images_with_progress(startIndex, endIndex);
-      const progressStr = UTF8ToString(wasmModule, progressPtr);
-      const progress = JSON.parse(progressStr);
+      if (individualMode) {
+        // Individual page processing mode for error recovery
+        let processedCount = 0;
+        const totalToProcess = endIndex - startIndex;
+        
+        for (let i = startIndex; i < endIndex; i++) {
+          if (skipList.includes(i + 1)) {
+            postMessage({ 
+              type: 'PAGE_SKIPPED', 
+              pageIndex: i + 1 
+            });
+            continue;
+          }
+          
+          try {
+            // Process single page
+            const progressPtr = wasmModule._process_images_with_progress(i, i+1);
+            const progressStr = UTF8ToString(wasmModule, progressPtr);
+            const progress = JSON.parse(progressStr);
+            
+            processedCount++;
+            postMessage({ 
+              type: 'PAGE_COMPLETE', 
+              pageIndex: i + 1,
+              current: processedCount, 
+              total: totalToProcess,
+              pageData: progress
+            });
+            
+          } catch (pageError) {
+            postMessage({ 
+              type: 'PAGE_ERROR', 
+              pageIndex: i + 1, 
+              error: pageError.message,
+              batchStart: startIndex,
+              batchEnd: endIndex
+            });
+            // Stop individual processing and wait for user decision
+            return;
+          }
+        }
+        
+        postMessage({ 
+          type: 'INDIVIDUAL_BATCH_COMPLETE', 
+          current: processedCount, 
+          total: totalToProcess,
+          batchStart: startIndex,
+          batchEnd: endIndex
+        });
+        
+      } else {
+        // Normal batch processing mode
+        const progressPtr = wasmModule._process_images_with_progress(startIndex, endIndex);
+        const progressStr = UTF8ToString(wasmModule, progressPtr);
+        const progress = JSON.parse(progressStr);
+        
+        postMessage({ 
+          type: 'BATCH_COMPLETE', 
+          current: progress.processed, 
+          total: progress.total,
+          batchStart: startIndex,
+          batchEnd: endIndex
+        });
+      }
       
-      postMessage({ 
-        type: 'BATCH_COMPLETE', 
-        current: progress.processed, 
-        total: progress.total
-      });
     } catch (error) {
-      postMessage({ type: 'ERROR', error: error.message });
+      // Batch failed - suggest switching to individual mode
+      postMessage({ 
+        type: 'BATCH_ERROR', 
+        error: error.message,
+        batchStart: data.startIndex,
+        batchEnd: data.endIndex
+      });
     }
   }
   
@@ -83,10 +144,114 @@ self.onmessage = async function(e) {
     }
   }
   
+  else if (type === 'GET_PARTIAL_RESULTS') {
+    try {
+      // Get partial results from WASM module
+      const partialResultPtr = wasmModule._get_partial_results();
+      const partialResultStr = UTF8ToString(wasmModule, partialResultPtr);
+      
+      let partialData;
+      try {
+        partialData = JSON.parse(partialResultStr);
+      } catch (e) {
+        throw new Error("Failed to parse partial results: " + e.message);
+      }
+      
+      // Also get current processed count for additional validation
+      const processedCount = wasmModule._get_processed_count();
+      const totalImages = wasmModule._get_total_images();
+      
+      // Enhance partial data with additional metadata
+      const enhancedPartialData = {
+        ...partialData,
+        metadata: {
+          timestamp: Date.now(),
+          processingComplete: processedCount >= totalImages,
+          progressPercentage: totalImages > 0 ? Math.round((processedCount / totalImages) * 100) : 0
+        }
+      };
+    console.log(enhancedPartialData);
+      postMessage({ 
+        type: 'PARTIAL_RESULTS', 
+        partialResults: enhancedPartialData
+      });
+      
+    } catch (error) {
+      // Fallback to basic progress info if partial results fail
+      try {
+        const processedCount = wasmModule._get_processed_count();
+        const totalImages = wasmModule._get_total_images();
+        
+        const fallbackData = {
+          progress: {
+            processedImages: processedCount,
+            totalImages: totalImages,
+            documentsFound: 0
+          },
+          results: {},
+          metadata: {
+            timestamp: Date.now(),
+            processingComplete: processedCount >= totalImages,
+            progressPercentage: totalImages > 0 ? Math.round((processedCount / totalImages) * 100) : 0,
+            error: "Partial results unavailable, showing basic progress",
+            originalError: error.message
+          }
+        };
+        
+        postMessage({ 
+          type: 'PARTIAL_RESULTS', 
+          partialResults: fallbackData
+        });
+        
+      } catch (fallbackError) {
+        // Complete fallback if even basic info is unavailable
+        postMessage({ 
+          type: 'PARTIAL_RESULTS', 
+          partialResults: {
+            progress: { processedImages: 0, totalImages: 0, documentsFound: 0 },
+            results: {},
+            metadata: {
+              timestamp: Date.now(),
+              processingComplete: false,
+              progressPercentage: 0,
+              error: "Unable to retrieve any partial results",
+              originalError: error.message,
+              fallbackError: fallbackError.message
+            }
+          }
+        });
+      }
+    }
+  }
+  
   else if (type === 'GET_TOTAL_IMAGES') {
     try {
       const total = wasmModule._get_total_images();
       postMessage({ type: 'TOTAL_IMAGES', total });
+    } catch (error) {
+      postMessage({ type: 'ERROR', error: error.message });
+    }
+  }
+  
+  else if (type === 'GET_PROCESSED_COUNT') {
+    try {
+      const processed = wasmModule._get_processed_count();
+      const total = wasmModule._get_total_images();
+      postMessage({ 
+        type: 'PROCESSED_COUNT', 
+        processed, 
+        total,
+        percentage: total > 0 ? Math.round((processed / total) * 100) : 0
+      });
+    } catch (error) {
+      postMessage({ type: 'ERROR', error: error.message });
+    }
+  }
+  
+  else if (type === 'CLEAR_IMAGES') {
+    try {
+      wasmModule._clear_images();
+      postMessage({ type: 'IMAGES_CLEARED' });
     } catch (error) {
       postMessage({ type: 'ERROR', error: error.message });
     }

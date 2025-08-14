@@ -51,9 +51,48 @@
     border-radius: 4px;
   }
   
+  .status-message.error {
+    background-color: #fff5f5;
+    border-color: #dc3545;
+    color: #721c24;
+  }
+  
+  .status-message.warning {
+    background-color: #fffbf0;
+    border-color: #ffc107;
+    color: #856404;
+  }
+  
   .spinner-border-sm {
     width: 1rem;
     height: 1rem;
+  }
+
+  .error-log {
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 0.9em;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 10px;
+  }
+
+  .recovery-controls {
+    background: #fff3cd;
+    border: 1px solid #ffeaa7;
+    border-radius: 4px;
+    padding: 15px;
+    margin: 15px 0;
+  }
+
+  .json-export {
+    background: #d1ecf1;
+    border: 1px solid #bee5eb;
+    border-radius: 4px;
+    padding: 15px;
+    margin: 15px 0;
   }
 
   </style>
@@ -348,6 +387,37 @@
       <small class="text-muted">Process Progress: <span id="processProgress">0/0</span></small>
     </div>
   </div>
+
+  <!-- Error Recovery Section -->
+  <div id="errorRecoverySection" style="display: none;">
+    <div class="recovery-controls">
+      <h5>⚠️ Error Recovery Mode</h5>
+      <p>An error occurred during processing. You can:</p>
+      <div class="btn-group" role="group">
+        <button class="btn btn-warning" onclick="skipCurrentPage()">Skip Current Page</button>
+        <button class="btn btn-info" onclick="retryCurrentPage()">Retry Current Page</button>
+        <button class="btn btn-success" onclick="continueWithPartialResults()">Use Partial Results</button>
+        <button class="btn btn-danger" onclick="resetProcessing()">Reset & Start Over</button>
+      </div>
+    </div>
+    
+    <div class="json-export">
+      <h6>Current Progress JSON:</h6>
+      <div class="d-flex gap-2 mb-2">
+        <button class="btn btn-sm btn-outline-primary" onclick="exportProgressJSON()">Download JSON</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="copyProgressJSON()">Copy to Clipboard</button>
+        <button class="btn btn-sm btn-outline-info" onclick="importProgressJSON()">Import JSON</button>
+        <input type="file" id="jsonFileInput" accept=".json" style="display: none;" onchange="handleJSONImport(event)">
+      </div>
+      <pre id="progressJSON" class="error-log" style="max-height: 150px;"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- Error Log Section -->
+<div id="errorLogSection" class="error-log" style="display: none;">
+  <h6>Error Log:</h6>
+  <div id="errorLogContent"></div>
 </div>
 
 <div id="output" class="mb-3"></div>
@@ -379,6 +449,17 @@ let originalPdfBytes = null;
 let worker = null;
 const images = [];
 let sortedPages = null;
+let processingState = {
+  currentPage: 0,
+  totalPages: 0,
+  skippedPages: new Set(),
+  errors: [],
+  partialResults: {},
+  processingStarted: false,
+  currentErrorBatch: null,
+  currentErrorPage: null,
+  individualMode: false
+};
 
 function toggleGuide(id, show) {
     const overlay = document.getElementById(id);
@@ -402,6 +483,7 @@ function updateProgress(current, total, type = 'general') {
     } else if (type === 'process') {
         document.getElementById('processProgress').textContent = `${current}/${total}`;
         progressBar.style.width = `${50 + (percentage / 2)}%`; // Second half for processing
+        processingState.currentPage = current;
     } else {
         progressBar.style.width = `${percentage}%`;
     }
@@ -409,12 +491,37 @@ function updateProgress(current, total, type = 'general') {
     progressBar.setAttribute('aria-valuenow', percentage);
 }
 
-function updateStatus(message, showSpinner = true) {
+function updateStatus(message, showSpinner = true, type = 'info') {
     const statusText = document.getElementById('statusText');
     const spinner = document.querySelector('.spinner-border');
+    const statusMessage = document.getElementById('statusMessage');
     
     statusText.textContent = message;
     spinner.style.display = showSpinner ? 'inline-block' : 'none';
+    
+    // Update status message styling based on type
+    statusMessage.className = `status-message ${type}`;
+    
+    // Log errors
+    if (type === 'error') {
+        logError(message);
+    }
+}
+
+function logError(message) {
+    const errorTime = new Date().toISOString();
+    const errorEntry = `[${errorTime}] ${message}`;
+    
+    processingState.errors.push(errorEntry);
+    
+    const errorLogSection = document.getElementById('errorLogSection');
+    const errorLogContent = document.getElementById('errorLogContent');
+    
+    errorLogSection.style.display = 'block';
+    errorLogContent.innerHTML += `<div>${errorEntry}</div>`;
+    errorLogContent.scrollTop = errorLogContent.scrollHeight;
+    
+    console.error(errorEntry);
 }
 
 function showProgress() {
@@ -425,120 +532,318 @@ function hideProgress() {
     document.getElementById('progressSection').style.display = 'none';
 }
 
-// Initialize worker - fallback to main thread if worker fails
+function showErrorRecovery() {
+    document.getElementById('errorRecoverySection').style.display = 'block';
+    updateProgressJSON();
+}
+
+function hideErrorRecovery() {
+    document.getElementById('errorRecoverySection').style.display = 'none';
+}
+
+function updateProgressJSON() {
+    const progressData = {
+        timestamp: new Date().toISOString(),
+        currentPage: processingState.currentPage,
+        totalPages: processingState.totalPages,
+        skippedPages: Array.from(processingState.skippedPages),
+        partialResults: processingState.partialResults,
+        errors: processingState.errors,
+        imagesProcessed: images.length
+    };
+    
+    document.getElementById('progressJSON').textContent = JSON.stringify(progressData, null, 2);
+    return progressData;
+}
+
+function exportProgressJSON() {
+    const progressData = updateProgressJSON();
+    const blob = new Blob([JSON.stringify(progressData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pdf_sorter_progress_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function copyProgressJSON() {
+    const progressData = updateProgressJSON();
+    navigator.clipboard.writeText(JSON.stringify(progressData, null, 2)).then(() => {
+        alert('Progress JSON copied to clipboard!');
+    }).catch(() => {
+        alert('Failed to copy to clipboard');
+    });
+}
+
+function importProgressJSON() {
+    document.getElementById('jsonFileInput').click();
+}
+
+function handleJSONImport(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            const progressData = JSON.parse(e.target.result);
+            
+            // Restore processing state
+            processingState.currentPage = progressData.currentPage || 0;
+            processingState.totalPages = progressData.totalPages || 0;
+            processingState.skippedPages = new Set(progressData.skippedPages || []);
+            processingState.partialResults = progressData.partialResults || {};
+            processingState.errors = progressData.errors || [];
+            
+            // Update UI
+            updateStatus(`Imported progress from ${progressData.timestamp}`, false, 'info');
+            updateProgressJSON();
+            
+            // If we have partial results, allow continuing
+            if (Object.keys(processingState.partialResults).length > 0) {
+                const continueBtn = document.createElement('button');
+                continueBtn.className = 'btn btn-success mt-2';
+                continueBtn.textContent = 'Continue from Imported Progress';
+                continueBtn.onclick = () => {
+                    sortedPages = processingState.partialResults;
+                    processingComplete();
+                    continueBtn.remove();
+                };
+                document.getElementById('errorRecoverySection').appendChild(continueBtn);
+            }
+            
+        } catch (error) {
+            updateStatus('Failed to import JSON: ' + error.message, false, 'error');
+        }
+    };
+    reader.readAsText(file);
+}
+
+function skipCurrentPage() {
+    if (processingState.currentErrorPage) {
+        processingState.skippedPages.add(processingState.currentErrorPage);
+        updateStatus(`Skipped page ${processingState.currentErrorPage}, continuing...`, true);
+        
+        // If we're in individual mode, continue from the next page in the error batch
+        if (processingState.currentErrorBatch && processingState.individualMode) {
+            continueIndividualProcessing(processingState.currentErrorPage);
+        } else {
+            // Continue processing from next page
+            continueProcessingFromPage(processingState.currentErrorPage + 1);
+        }
+    } else {
+        updateStatus('No current error page to skip', false, 'warning');
+    }
+}
+
+function retryCurrentPage() {
+    if (processingState.currentErrorPage) {
+        updateStatus(`Retrying page ${processingState.currentErrorPage}...`, true);
+        
+        // If we're in individual mode, retry the current page in the error batch
+        if (processingState.currentErrorBatch && processingState.individualMode) {
+            continueIndividualProcessing(processingState.currentErrorPage - 1);
+        } else {
+            // Retry current page processing
+            continueProcessingFromPage(processingState.currentErrorPage);
+        }
+    } else if (processingState.currentErrorBatch) {
+        // Retry the entire batch that failed, but in individual mode
+        updateStatus(`Retrying failed batch (pages ${processingState.currentErrorBatch.start + 1}-${processingState.currentErrorBatch.end}) in individual mode...`, true);
+        processingState.individualMode = true;
+        hideErrorRecovery();
+        
+        worker.postMessage({
+            type: 'PROCESS_BATCH',
+            data: { 
+                startIndex: processingState.currentErrorBatch.start, 
+                endIndex: processingState.currentErrorBatch.end,
+                skipList: Array.from(processingState.skippedPages),
+                individualMode: true
+            }
+        });
+    } else {
+        updateStatus('No current error to retry', false, 'warning');
+    }
+}
+
+function continueWithPartialResults() {
+    if (Object.keys(processingState.partialResults).length > 0) {
+        sortedPages = processingState.partialResults;
+        updateStatus('Using partial results', false, 'warning');
+        hideErrorRecovery();
+        processingComplete();
+    } else {
+        updateStatus('No partial results available', false, 'error');
+    }
+}
+
+function resetProcessing() {
+    // Reset all state
+    processingState = {
+        currentPage: 0,
+        totalPages: 0,
+        skippedPages: new Set(),
+        errors: [],
+        partialResults: {},
+        processingStarted: false,
+        currentErrorBatch: null,
+        currentErrorPage: null,
+        individualMode: false
+    };
+    
+    images.length = 0;
+    sortedPages = null;
+    
+    // Clear UI
+    document.getElementById('output').innerHTML = '';
+    document.getElementById('downloads').innerHTML = '';
+    document.getElementById('carouselGrid').innerHTML = '';
+    document.getElementById('errorLogSection').style.display = 'none';
+    document.getElementById('errorLogContent').innerHTML = '';
+    
+    hideErrorRecovery();
+    hideProgress();
+    
+    updateStatus('Processing reset. Please select a file to start over.', false);
+}
+
+async function continueProcessingFromPage(startPage) {
+    if (!worker || !processingState.processingStarted) {
+        updateStatus('Cannot continue: processing not initialized', false, 'error');
+        return;
+    }
+    
+    try {
+        hideErrorRecovery();
+        
+        // Continue processing from specified page
+        const remainingPages = processingState.totalPages - startPage + 1;
+        
+        if (remainingPages <= 0) {
+            updateStatus('No more pages to process', false, 'info');
+            // Get final results
+            worker.postMessage({ type: 'GET_RESULTS' });
+            return;
+        }
+        
+        updateStatus(`Continuing processing from page ${startPage}...`, true);
+        
+        // Reset individual mode for new batches
+        processingState.individualMode = false;
+        processingState.currentErrorBatch = null;
+        processingState.currentErrorPage = null;
+        
+        // Process remaining pages in normal batch mode
+        await continueProcessingFromBatch(startPage - 1, false);
+        
+    } catch (error) {
+        updateStatus('Error continuing processing: ' + error.message, false, 'error');
+        showErrorRecovery();
+    }
+}
+
+async function continueProcessingFromBatch(startIndex, individualMode = false) {
+    const batchSize = 10;
+    
+    for (let i = startIndex; i < processingState.totalPages; i += batchSize) {
+        const endIndex = Math.min(i + batchSize, processingState.totalPages);
+        
+        updateStatus(`Processing batch: pages ${i + 1}-${endIndex} of ${processingState.totalPages} ${individualMode ? '(individual mode)' : ''}...`);
+        
+        // Send batch processing request to worker
+        await new Promise((resolve, reject) => {
+            const handleBatchResponse = (e) => {
+                const { type } = e.data;
+                
+                if (type === 'BATCH_COMPLETE' || type === 'INDIVIDUAL_BATCH_COMPLETE') {
+                    worker.removeEventListener('message', handleBatchResponse);
+                    resolve();
+                } else if (type === 'BATCH_ERROR') {
+                    worker.removeEventListener('message', handleBatchResponse);
+                    // Don't reject here - let the error handler in the message listener deal with it
+                    resolve(); // Resolve to prevent hanging
+                } else if (type === 'PAGE_ERROR') {
+                    worker.removeEventListener('message', handleBatchResponse);
+                    // Don't reject here - let the error handler in the message listener deal with it
+                    resolve(); // Resolve to prevent hanging
+                } else if (type === 'ERROR') {
+                    worker.removeEventListener('message', handleBatchResponse);
+                    reject(new Error(e.data.error));
+                }
+            };
+            
+            worker.addEventListener('message', handleBatchResponse);
+            
+            worker.postMessage({
+                type: 'PROCESS_BATCH',
+                data: { 
+                    startIndex: i, 
+                    endIndex,
+                    skipList: Array.from(processingState.skippedPages),
+                    individualMode: individualMode
+                }
+            });
+        });
+        
+        // If we're in individual mode and completed this batch, switch back to normal mode
+        if (individualMode && i + batchSize >= processingState.totalPages) {
+            processingState.individualMode = false;
+        }
+    }
+    
+    // If we completed all batches without error, get final results
+    if (startIndex === 0 || !processingState.currentErrorBatch) {
+        updateStatus('All batches processed, getting final results...', true);
+        worker.postMessage({ type: 'GET_RESULTS' });
+    }
+}
+
+async function continueIndividualProcessing(fromPage) {
+    if (!processingState.currentErrorBatch) {
+        updateStatus('No error batch context for individual processing', false, 'error');
+        return;
+    }
+    
+    const { start, end } = processingState.currentErrorBatch;
+    console.log(` Start of Individual ${start} to ${end}`);
+    // Continue individual processing from the specified page within the error batch
+    const adjustedStart = Math.max(start, fromPage);
+    
+    if (adjustedStart >= end) {
+        // We've completed the error batch, continue with normal batch processing
+        updateStatus('Error batch completed, returning to normal batch mode...', true);
+        processingState.individualMode = false;
+        continueProcessingFromBatch(end, false);
+        return;
+    }
+    
+    updateStatus(`Continuing individual processing from page ${adjustedStart + 1} in error batch...`, true);
+    
+    worker.postMessage({
+        type: 'PROCESS_BATCH',
+        data: { 
+            startIndex: adjustedStart, 
+            endIndex: end,
+            skipList: Array.from(processingState.skippedPages),
+            individualMode: true
+        }
+    });
+}
+
+// Initialize worker
 function initWorker() {
     return new Promise((resolve, reject) => {
         try {
             worker = new Worker('worker.js');
         } catch (error) {
-            console.warn('Could not load worker.js, falling back to inline worker');
-            // Fallback: create inline worker
-            const workerCode = `
-                let wasmModule = null;
-                let Module = null;
-                
-                // Load the sorting.js file
-                try {
-                    importScripts('sorting.js');
-                } catch (e) {
-                    console.error('Failed to load sorting.js:', e);
-                    postMessage({ type: 'ERROR', error: 'Failed to load sorting.js: ' + e.message });
-                }
-                
-                function UTF8ToString(mod, ptr) {
-                    const memory = mod.HEAPU8;
-                    let endPtr = ptr;
-                    while(memory[endPtr] !== 0) endPtr++;
-                    return new TextDecoder('utf8').decode(memory.subarray(ptr, endPtr));
-                }
-                
-                self.onmessage = async function(e) {
-                    const { type, data } = e.data;
-                    
-                    if (type === 'INIT_WASM') {
-                        try {
-                            postMessage({ type: 'STATUS', message: 'Loading WASM module...' });
-                            if (typeof Module === 'function') {
-                                wasmModule = await Module();
-                                postMessage({ type: 'WASM_READY' });
-                            } else {
-                                throw new Error('Module function not available');
-                            }
-                        } catch (error) {
-                            postMessage({ type: 'ERROR', error: error.message });
-                        }
-                    }
-                    
-                    else if (type === 'ADD_IMAGE') {
-                        try {
-                            const { imageData, width, height, index } = data;
-                            
-                            const len = imageData.length;
-                            const ptr = wasmModule._malloc(len);
-                            wasmModule.HEAPU8.set(imageData, ptr);
-                            wasmModule._add_image(ptr, width, height, index);
-                            wasmModule._free(ptr);
-                            
-                            postMessage({ type: 'IMAGE_ADDED', index });
-                        } catch (error) {
-                            postMessage({ type: 'ERROR', error: error.message });
-                        }
-                    }
-                    
-                    else if (type === 'PROCESS_BATCH') {
-                        try {
-                            const { startIndex, endIndex } = data;
-                            
-                            const progressPtr = wasmModule._process_images_with_progress(startIndex, endIndex);
-                            const progressStr = UTF8ToString(wasmModule, progressPtr);
-                            const progress = JSON.parse(progressStr);
-                            
-                            postMessage({ 
-                                type: 'BATCH_COMPLETE', 
-                                current: progress.processed, 
-                                total: progress.total
-                            });
-                        } catch (error) {
-                            postMessage({ type: 'ERROR', error: error.message });
-                        }
-                    }
-                    
-                    else if (type === 'GET_RESULTS') {
-                        try {
-                            const resultPtr = wasmModule._get_final_results();
-                            const resultStr = UTF8ToString(wasmModule, resultPtr);
-                            
-                            let sortedPages;
-                            try {
-                                sortedPages = JSON.parse(resultStr);
-                            } catch (e) {
-                                throw new Error("Failed to parse WASM results: " + e.message);
-                            }
-                            
-                            postMessage({ type: 'RESULTS_READY', sortedPages });
-                            wasmModule._clear_images();
-                        } catch (error) {
-                            postMessage({ type: 'ERROR', error: error.message });
-                        }
-                    }
-                    
-                    else if (type === 'GET_TOTAL_IMAGES') {
-                        try {
-                            const total = wasmModule._get_total_images();
-                            postMessage({ type: 'TOTAL_IMAGES', total });
-                        } catch (error) {
-                            postMessage({ type: 'ERROR', error: error.message });
-                        }
-                    }
-                };
-            `;
-            
-            const blob = new Blob([workerCode], { type: 'application/javascript' });
-            worker = new Worker(URL.createObjectURL(blob));
+            console.warn('Could not load worker.js');
+            return
         }
         
         worker.onmessage = function(e) {
-            const { type, current, total, index, sortedPages: results, error } = e.data;
+            const { type, current, total, index, sortedPages: results, error, pageIndex, pageData, partialResults, batchStart, batchEnd } = e.data;
             
             switch (type) {
                 case 'STATUS':
@@ -553,34 +858,108 @@ function initWorker() {
                     // Handle individual image completion if needed
                     break;
                     
+                case 'PAGE_COMPLETE':
+                    updateStatus(`Successfully processed page ${pageIndex}`);
+                    updateProgress(current, total, 'process');
+                    
+                    // Store partial results as we go
+                    if (pageData) {
+                        try {
+                            // Merge page data into partial results
+                            Object.assign(processingState.partialResults, pageData);
+                        } catch (e) {
+                            console.warn('Failed to merge page data:', e);
+                        }
+                    }
+                    break;
+                    
+                case 'PAGE_SKIPPED':
+                    updateStatus(`Skipped page ${pageIndex} as requested`, false, 'warning');
+                    break;
+                    
+                case 'PAGE_ERROR':
+                    const errorMsg = `Error processing page ${pageIndex}: ${error}`;
+                    updateStatus(errorMsg, false, 'error');
+                    
+                    // Store the current error context
+                    processingState.currentErrorBatch = { start: batchStart, end: batchEnd };
+                    processingState.currentErrorPage = pageIndex;
+                    
+                    // Request partial results before showing recovery options
+                    worker.postMessage({ type: 'GET_PARTIAL_RESULTS' });
+                    
+                    // Show error recovery after a short delay
+                    setTimeout(() => {
+                        showErrorRecovery();
+                    }, 1000);
+                    break;
+                    
                 case 'BATCH_COMPLETE':
-                    updateStatus(`Processed ${current} of ${total} pages`);
+                    updateStatus(`Batch processed: ${current} of ${total} pages`);
                     updateProgress(current, total, 'process');
                     break;
                     
+                case 'INDIVIDUAL_BATCH_COMPLETE':
+                    updateStatus(`Individual batch completed: ${current} of ${total} pages processed`);
+                    updateProgress(current, total, 'process');
+                    
+                    // Continue with next batch in normal mode
+                    continueProcessingFromBatch(batchEnd, false);
+                    break;
+                    
+                case 'BATCH_ERROR':
+                    const batchErrorMsg = `Batch error (pages ${batchStart}-${batchEnd}): ${error}`;
+                    updateStatus(batchErrorMsg, false, 'error');
+                    
+                    // Store the error context
+                    processingState.currentErrorBatch = { start: batchStart, end: batchEnd };
+                    
+                    // Request partial results and show recovery options
+                    worker.postMessage({ type: 'GET_PARTIAL_RESULTS' });
+                    
+                    setTimeout(() => {
+                        showErrorRecovery();
+                    }, 1000);
+                    break;
+                    
+                case 'PARTIAL_RESULTS':
+                    // Update partial results
+                    processingState.partialResults = { ...processingState.partialResults, ...partialResults };
+                    updateProgressJSON();
+                    break;
+                    
                 case 'TOTAL_IMAGES':
-                    // Store total for progress calculation
+                    processingState.totalPages = e.data.total;
                     break;
                     
                 case 'RESULTS_READY':
                     sortedPages = results;
-                    console.log(results);
-                    updateStatus('Processing complete!', false);
+                    console.log('Final results:', results);
+                    updateStatus('Processing complete!', false, 'info');
                     setTimeout(() => {
                         hideProgress();
+                        hideErrorRecovery();
                         processingComplete();
                     }, 1000);
                     break;
                     
                 case 'ERROR':
-                    updateStatus('Error: ' + error, false);
-                    setTimeout(hideProgress, 3000);
+                    updateStatus('Worker error: ' + error, false, 'error');
+                    
+                    // Request partial results before showing recovery
+                    worker.postMessage({ type: 'GET_PARTIAL_RESULTS' });
+                    
+                    setTimeout(() => {
+                        showErrorRecovery();
+                    }, 1000);
+                    
                     console.error('Worker error:', error);
                     break;
             }
         };
         
         worker.onerror = function(error) {
+            updateStatus('Worker initialization error: ' + error.message, false, 'error');
             reject(error);
         };
         
@@ -592,172 +971,195 @@ function initWorker() {
 // Process PDF in main thread, send images to worker
 async function processPDF(pdfBytes) {
     try {
+        processingState.processingStarted = true;
         updateStatus('Loading PDF...');
         
         // Configure PDF.js in main thread
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
         
         const pdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
+        processingState.totalPages = pdf.numPages;
         
         updateStatus('Rendering pages...');
         images.length = 0; // Clear existing images
         
-        // Render all pages in main thread
+        // Render all pages in main thread with error handling
         for (let i = 1; i <= pdf.numPages; i++) {
-            const page = await pdf.getPage(i);
-            const viewport = page.getViewport({ scale: 2.5 });
-            
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            
-            await page.render({ canvasContext: ctx, viewport }).promise;
-            
-            // Get image data and send to worker
-            const imgData = ctx.getImageData(0, 0, viewport.width, viewport.height);
-            
-            // Store image for UI display
-            images.push(canvas.toDataURL());
-            
-            // Send image data to worker
-            worker.postMessage({
-                type: 'ADD_IMAGE',
-                data: {
-                    imageData: imgData.data,
-                    width: viewport.width,
-                    height: viewport.height,
-                    index: i
+            try {
+                const page = await pdf.getPage(i);
+                const viewport = page.getViewport({ scale: 2.5 });
+                
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                
+                await page.render({ canvasContext: ctx, viewport }).promise;
+                
+                // Get image data and send to worker
+                const imgData = ctx.getImageData(0, 0, viewport.width, viewport.height);
+                
+                // Store image for UI display
+                images.push(canvas.toDataURL());
+                
+                // Send image data to worker with error handling
+                try {
+                    worker.postMessage({
+                        type: 'ADD_IMAGE',
+                        data: {
+                            imageData: imgData.data,
+                            width: viewport.width,
+                            height: viewport.height,
+                            index: i
+                        }
+                    });
+                } catch (workerError) {
+                    updateStatus(`Error sending page ${i} to worker: ${workerError.message}`, false, 'error');
+                    showErrorRecovery();
+                    return;
                 }
-            });
-            
-            updateStatus(`Rendered page ${i} of ${pdf.numPages}`);
-            updateProgress(i, pdf.numPages, 'render');
+                
+                updateStatus(`Rendered page ${i} of ${pdf.numPages}`);
+                updateProgress(i, pdf.numPages, 'render');
+                
+            } catch (pageError) {
+                const errorMsg = `Error rendering page ${i}: ${pageError.message}`;
+                updateStatus(errorMsg, false, 'error');
+                
+                // Add a placeholder image for the failed page
+                images.push('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text x="50" y="50" text-anchor="middle">Error</text></svg>');
+                
+                // Continue with next page
+                continue;
+            }
         }
         
         updateStatus('Starting QR code detection...');
         
-        // Process images in batches using worker
-        const batchSize = 10;
-        const totalImages = pdf.numPages;
-        
-        for (let i = 0; i < totalImages; i += batchSize) {
-            const endIndex = Math.min(i + batchSize, totalImages);
-            
-            updateStatus(`Processing pages ${i + 1}-${endIndex} of ${totalImages}...`);
-            
-            // Send batch processing request to worker
-            await new Promise(resolve => {
-                const handleBatchComplete = (e) => {
-                    if (e.data.type === 'BATCH_COMPLETE') {
-                        worker.removeEventListener('message', handleBatchComplete);
-                        resolve();
-                    }
-                };
-                worker.addEventListener('message', handleBatchComplete);
-                
-                worker.postMessage({
-                    type: 'PROCESS_BATCH',
-                    data: { startIndex: i, endIndex }
-                });
-            });
-        }
-        
-        // Get final results from worker
-        updateStatus('Finalizing results...');
-        worker.postMessage({ type: 'GET_RESULTS' });
+        // Process images in batches using worker with error handling
+        await continueProcessingFromBatch(0, false);
         
     } catch (error) {
-        updateStatus('Error: ' + error.message, false);
-        setTimeout(hideProgress, 3000);
+        updateStatus('PDF processing error: ' + error.message, false, 'error');
+        showErrorRecovery();
         console.error('Processing error:', error);
     }
 }
 
 async function processingComplete() {
-    await splitPdfAndCreateDownloads(sortedPages);
-    
-    if (sortedPages["Error"] && sortedPages["Error"].length > 0) {
-        renderManualAssignmentUI(sortedPages["Error"], sortedPages);
+    try {
+        await splitPdfAndCreateDownloads(sortedPages);
+        
+        if (sortedPages["Error"] && sortedPages["Error"].length > 0) {
+            renderManualAssignmentUI(sortedPages["Error"], sortedPages);
+        }
+        
+        // Clear processing state on successful completion
+        processingState.processingStarted = false;
+        
+    } catch (error) {
+        updateStatus('Error completing processing: ' + error.message, false, 'error');
+        showErrorRecovery();
     }
 }
 
 async function splitPdfAndCreateDownloads(sortedPages) {
-  const zip = new JSZip();
-  const file = document.getElementById('fileInput').files[0]
-  originalPdfBytes = await file.arrayBuffer();
-  const pdfDoc = await PDFLib.PDFDocument.load(originalPdfBytes);
-  const numPages = pdfDoc.getPageCount();
-  const downloadsDiv = document.getElementById('downloads');
-  const carouselGrid = document.getElementById('carouselGrid');
+  try {
+    const zip = new JSZip();
+    const file = document.getElementById('fileInput').files[0]
+    originalPdfBytes = await file.arrayBuffer();
+    
+    const pdfDoc = await PDFLib.PDFDocument.load(originalPdfBytes);
+    const numPages = pdfDoc.getPageCount();
+    const downloadsDiv = document.getElementById('downloads');
+    const carouselGrid = document.getElementById('carouselGrid');
 
-  downloadsDiv.innerHTML = '';
-  carouselGrid.innerHTML = '';
+    downloadsDiv.innerHTML = '';
+    carouselGrid.innerHTML = '';
 
-  for (const docName in sortedPages) {
-    if (docName === "Error") continue;
+    for (const docName in sortedPages) {
+      if (docName === "Error") continue;
 
-    const pagesData = sortedPages[docName];
-    pagesData.sort((a,b) => a.pageno - b.pageno);
+      try {
+        const pagesData = sortedPages[docName];
+        pagesData.sort((a,b) => a.pageno - b.pageno);
 
-    const newPdfDoc = await PDFLib.PDFDocument.create();
-    const docImages = [];
+        const newPdfDoc = await PDFLib.PDFDocument.create();
+        const docImages = [];
 
-    for (const p of pagesData) {
-      if (p.foundpage >= numPages) continue;
-      const [copiedPage] = await newPdfDoc.copyPages(pdfDoc, [p.foundpage]);
-      newPdfDoc.addPage(copiedPage);
-      docImages.push(images[p.foundpage]);
+        for (const p of pagesData) {
+          if (p.foundpage >= numPages) continue;
+          
+          try {
+            const [copiedPage] = await newPdfDoc.copyPages(pdfDoc, [p.foundpage]);
+            newPdfDoc.addPage(copiedPage);
+            docImages.push(images[p.foundpage]);
+          } catch (pageError) {
+            logError(`Error copying page ${p.foundpage} for document ${docName}: ${pageError.message}`);
+            continue;
+          }
+        }
+
+        const pdfBytes = await newPdfDoc.save();
+        const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+        zip.file(`${docName}.pdf`, blob);
+
+        const col = document.createElement('div');
+        col.className = 'col-md-6 col-lg-4';
+
+        const carouselId = `carousel-${docName}`;
+        const indicators = docImages.map((_, idx) =>
+          `<button type="button" data-bs-target="#${carouselId}" data-bs-slide-to="${idx}" ${idx === 0 ? 'class="active"' : ''}></button>`
+        ).join("");
+
+        const slides = docImages.map((src, idx) =>
+          `<div class="carousel-item ${idx === 0 ? 'active' : ''}">
+            <img src="${src}" class="d-block w-100" style="max-height: 300px; object-fit: contain;">
+          </div>`
+        ).join("");
+
+        col.innerHTML = `
+          <div class="card h-100">
+            <div id="${carouselId}" class="carousel slide" data-bs-ride="carousel">
+              <div class="carousel-indicators">${indicators}</div>
+              <div class="carousel-inner">${slides}</div>
+              <button class="carousel-control-prev" type="button" data-bs-target="#${carouselId}" data-bs-slide="prev">
+                <span class="carousel-control-prev-icon"></span>
+              </button>
+              <button class="carousel-control-next" type="button" data-bs-target="#${carouselId}" data-bs-slide="next">
+                <span class="carousel-control-next-icon"></span>
+              </button>
+            </div>
+            <div class="card-body text-center">
+              <h5 class="card-title">${docName}</h5>
+              <a class="btn btn-primary" download="${docName}.pdf" href="${URL.createObjectURL(blob)}">Download PDF</a>
+            </div>
+          </div>`;
+
+        carouselGrid.appendChild(col);
+        
+      } catch (docError) {
+        logError(`Error creating document ${docName}: ${docError.message}`);
+        continue;
+      }
     }
 
-    const pdfBytes = await newPdfDoc.save();
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-    zip.file(`${docName}.pdf`, blob);
-
-    const col = document.createElement('div');
-    col.className = 'col-md-6 col-lg-4';
-
-    const carouselId = `carousel-${docName}`;
-    const indicators = docImages.map((_, idx) =>
-      `<button type="button" data-bs-target="#${carouselId}" data-bs-slide-to="${idx}" ${idx === 0 ? 'class="active"' : ''}></button>`
-    ).join("");
-
-    const slides = docImages.map((src, idx) =>
-      `<div class="carousel-item ${idx === 0 ? 'active' : ''}">
-        <img src="${src}" class="d-block w-100" style="max-height: 300px; object-fit: contain;">
-      </div>`
-    ).join("");
-
-    col.innerHTML = `
-      <div class="card h-100">
-        <div id="${carouselId}" class="carousel slide" data-bs-ride="carousel">
-          <div class="carousel-indicators">${indicators}</div>
-          <div class="carousel-inner">${slides}</div>
-          <button class="carousel-control-prev" type="button" data-bs-target="#${carouselId}" data-bs-slide="prev">
-            <span class="carousel-control-prev-icon"></span>
-          </button>
-          <button class="carousel-control-next" type="button" data-bs-target="#${carouselId}" data-bs-slide="next">
-            <span class="carousel-control-next-icon"></span>
-          </button>
-        </div>
-        <div class="card-body text-center">
-          <h5 class="card-title">${docName}</h5>
-          <a class="btn btn-primary" download="${docName}.pdf" href="${URL.createObjectURL(blob)}">Download PDF</a>
-        </div>
-      </div>`;
-
-    carouselGrid.appendChild(col);
+    zip.generateAsync({ type: "blob" }).then((blob) => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = "sorted_pdfs.zip";
+      a.style = "width:100%";
+      a.className = "btn btn-success mb-3";
+      a.textContent = "Download All Files";
+      downloadsDiv.appendChild(a);
+    }).catch((zipError) => {
+      logError(`Error creating ZIP file: ${zipError.message}`);
+    });
+    
+  } catch (error) {
+    updateStatus('Error creating downloads: ' + error.message, false, 'error');
+    throw error;
   }
-
-  zip.generateAsync({ type: "blob" }).then((blob) => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = "sorted_pdfs.zip";
-    a.style = "width:100%";
-    a.className = "btn btn-success mb-3";
-    a.textContent = "Download All Files";
-    downloadsDiv.appendChild(a);
-  });
 }
 
 let activeIndex = null;
@@ -832,14 +1234,18 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
   rerunBtn.className = 'btn btn-success mt-3';
   rerunBtn.textContent = 'Re-run Split with Manual Assignments';
   rerunBtn.onclick = async () => {
-    for (const docName in assignments) {
-      if (!sortedPages[docName]) sortedPages[docName] = [];
-      sortedPages[docName].push(...assignments[docName]);
+    try {
+      for (const docName in assignments) {
+        if (!sortedPages[docName]) sortedPages[docName] = [];
+        sortedPages[docName].push(...assignments[docName]);
+      }
+      sortedPages["ErrorOld"] = sortedPages["Error"];
+      delete sortedPages["Error"];
+      await splitPdfAndCreateDownloads(sortedPages);
+      container.remove();
+    } catch (error) {
+      updateStatus('Error re-running split: ' + error.message, false, 'error');
     }
-    sortedPages["ErrorOld"] = sortedPages["Error"];
-    delete sortedPages["Error"];
-    await splitPdfAndCreateDownloads(sortedPages);
-    container.remove();
   };
 
   container.appendChild(rerunBtn);
@@ -883,6 +1289,9 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
   if (!file) return;
   
   try {
+    // Reset state for new file
+    resetProcessing();
+    
     originalPdfBytes = await file.arrayBuffer();
     showProgress();
     updateStatus('Initializing worker...');
@@ -892,12 +1301,12 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
       await initWorker();
     }
     
-    // Start processing (now handled in main thread)
+    // Start processing
     await processPDF(originalPdfBytes);
     
   } catch (error) {
-    updateStatus('Error: ' + error.message, false);
-    setTimeout(hideProgress, 3000);
+    updateStatus('File processing error: ' + error.message, false, 'error');
+    showErrorRecovery();
     console.error('Processing error:', error);
   }
 });
@@ -909,6 +1318,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.log('Worker initialized successfully');
   } catch (error) {
     console.error('Failed to initialize worker:', error);
+    updateStatus('Failed to initialize worker: ' + error.message, false, 'error');
   }
 });
 </script>
