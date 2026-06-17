@@ -471,6 +471,9 @@
 let originalPdfBytes = null;
 let wasmModule = null;
 const images = [];
+let renderMode      = '2d';      // '2d' | 'webgl' | 'webgpu'
+let gpuDevice       = null;      // WebGPU device, if initialised
+
 function toggleGuide(id, show) {
     const overlay = document.getElementById(id);
     const sidebar = overlay.children[0];
@@ -977,13 +980,6 @@ function setStatus(label, { spinner = true, progress = null } = {}) {
 /* ============================================================
    Parallel, dual-scale PDF rendering with GPU OffscreenCanvas
    ============================================================ */
-
-let originalPdfBytes = null;
-let wasmModule      = null;
-let renderMode      = '2d';      // '2d' | 'webgl' | 'webgpu'
-let gpuDevice       = null;      // WebGPU device, if initialised
-const images        = [];
-
 const SCAN_SCALE    = 1.5;
 const DISPLAY_SCALE = 2.5;
 const RENDER_BATCH  = 6;
@@ -1026,25 +1022,6 @@ const RENDER_BATCH  = 6;
   else                       status.textContent  = 'GPU acceleration unavailable';
 })();
 
-/* ── Helpers ───────────────────────────────────────────────── */
-function toggleGuide(id, show) {
-  const overlay = document.getElementById(id);
-  const sidebar = overlay.children[0];
-  if (show) {
-    overlay.style.display = 'block';
-    setTimeout(() => sidebar.classList.add('open'), 10);
-  } else {
-    sidebar.classList.remove('open');
-    setTimeout(() => overlay.style.display = 'none', 300);
-  }
-}
-
-function UTF8ToString(mod, ptr) {
-  const memory = mod.HEAPU8;
-  let endPtr = ptr;
-  while (memory[endPtr] !== 0) endPtr++;
-  return new TextDecoder('utf8').decode(memory.subarray(ptr, endPtr));
-}
 
 /** Force a browser repaint/layout flush before proceeding */
 function flushDOM() {
