@@ -923,12 +923,73 @@ function setStatus(label, { spinner = true, progress = null } = {}) {
   output.innerHTML = html;
 }
 
+/* ============================================================
+   Parallel, dual-scale PDF rendering with GPU OffscreenCanvas
+   ============================================================ */
+
+const SCAN_SCALE   = 1.5;   // scale used for WASM QR scanning (low memory)
+const DISPLAY_SCALE = 2.5;  // scale used for the visible thumbnails / preview
+const RENDER_BATCH  = 6;    // pages rendered in parallel at once
+
+/**
+ * Render one page at the given scale onto an OffscreenCanvas (GPU path)
+ * or a regular Canvas as fallback, returning a data-URL.
+ */
+async function renderPageToDataUrl(pdfPage, scale) {
+  const viewport = pdfPage.getViewport({ scale });
+
+  let canvas, ctx;
+  if (typeof OffscreenCanvas !== 'undefined') {
+    canvas = new OffscreenCanvas(viewport.width, viewport.height);
+    ctx    = canvas.getContext('2d');
+  } else {
+    canvas        = document.createElement('canvas');
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    ctx           = canvas.getContext('2d');
+  }
+
+  await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+
+  if (canvas instanceof OffscreenCanvas) {
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.88 });
+    return new Promise((res) => {
+      const reader = new FileReader();
+      reader.onload = () => res(reader.result);
+      reader.readAsDataURL(blob);
+    });
+  }
+  return canvas.toDataURL('image/jpeg', 0.88);
+}
+
+/**
+ * Extract raw RGBA pixels from a page at SCAN_SCALE,
+ * pass them to WASM, then free immediately.
+ */
+async function scanPageWithWasm(pdfPage, pageNumber) {
+  const viewport = pdfPage.getViewport({ scale: SCAN_SCALE });
+
+  // Always use a regular canvas for getImageData (OffscreenCanvas blocks that)
+  const canvas        = document.createElement('canvas');
+  canvas.width        = viewport.width;
+  canvas.height       = viewport.height;
+  const ctx           = canvas.getContext('2d');
+  await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const len     = imgData.data.length;
+  const ptr     = wasmModule._malloc(len);
+  wasmModule.HEAPU8.set(imgData.data, ptr);
+  wasmModule._add_image(ptr, canvas.width, canvas.height, pageNumber);
+  wasmModule._free(ptr);           // free immediately — don't accumulate
+}
+
 document.getElementById('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
   document.getElementById('manualAssign').innerHTML = '';
-  document.getElementById('downloads').innerHTML = '';
+  document.getElementById('downloads').innerHTML   = '';
   document.getElementById('carouselGrid').innerHTML = '';
 
   originalPdfBytes = await file.arrayBuffer();
@@ -936,41 +997,50 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
   wasmModule = await Module();
 
   const pdf = await pdfjsLib.getDocument({ data: originalPdfBytes }).promise;
-  setStatus('Rendering pages...', { progress: { current: 0, total: pdf.numPages } });
+  const total = pdf.numPages;
+  setStatus('Rendering & scanning pages...', { progress: { current: 0, total } });
 
   images.length = 0;
+  for (let i = 0; i < total; i++) images.push(null); // pre-size so indices are stable
 
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 3.0 });
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    await page.render({ canvasContext: ctx, viewport }).promise;
+  let completed = 0;
 
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const len = imgData.data.length;
-    const ptr = wasmModule._malloc(len);
-    wasmModule.HEAPU8.set(imgData.data, ptr);
-    wasmModule._add_image(ptr, canvas.width, canvas.height, i);
-    const dataUrl = canvas.toDataURL();
-    images.push(dataUrl);
-    wasmModule._free(ptr);
-
-    setStatus('Rendering pages...', { progress: { current: i, total: pdf.numPages } });
+  function updateProgress() {
+    completed++;
+    setStatus('Rendering & scanning pages...', { progress: { current: completed, total } });
     const thumbStrip = document.getElementById('renderThumbs');
-    if (thumbStrip) {
-      const thumbImg = document.createElement('img');
-      thumbImg.src = dataUrl;
-      thumbImg.title = `Page ${i}`;
-      thumbStrip.appendChild(thumbImg);
+    if (thumbStrip && images[completed - 1]) {
+      const img   = document.createElement('img');
+      img.src     = images[completed - 1];
+      img.title   = `Page ${completed}`;
+      thumbStrip.appendChild(img);
       thumbStrip.scrollTop = thumbStrip.scrollHeight;
     }
-    console.log(`Rendered Image ${i} of ${pdf.numPages}`);
   }
 
-  console.log('Starting WASM...');
+  // Process pages in parallel batches
+  for (let batchStart = 1; batchStart <= total; batchStart += RENDER_BATCH) {
+    const batchEnd   = Math.min(batchStart + RENDER_BATCH - 1, total);
+    const batchNums  = [];
+    for (let n = batchStart; n <= batchEnd; n++) batchNums.push(n);
+
+    await Promise.all(batchNums.map(async (pageNum) => {
+      const pdfPage = await pdf.getPage(pageNum);
+      const idx     = pageNum - 1;
+
+      // Run scan (WASM) and display render in parallel
+      const [displayUrl] = await Promise.all([
+        renderPageToDataUrl(pdfPage, DISPLAY_SCALE),
+        scanPageWithWasm(pdfPage, pageNum),
+      ]);
+
+      images[idx] = displayUrl;
+      updateProgress();
+      console.log(`Processed page ${pageNum} / ${total}`);
+    }));
+  }
+
+  console.log('Starting WASM sort...');
   setStatus('Sorting pages by QR code (running WASM)...');
   const resultPtr = wasmModule._process_images();
   const resultStr = UTF8ToString(wasmModule, resultPtr);
@@ -981,7 +1051,7 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
     sortedPages = JSON.parse(resultStr);
     console.log(sortedPages);
   } catch (err) {
-    console.error("JSON parse error:", err);
+    console.error('JSON parse error:', err);
     setStatus('Error parsing WASM JSON output.', { spinner: false });
     return;
   }
@@ -991,8 +1061,8 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
   await splitPdfAndCreateDownloads(sortedPages);
   setStatus('Done', { spinner: false });
 
-  if (sortedPages["Error"] && sortedPages["Error"].length > 0) {
-    renderManualAssignmentUI(sortedPages["Error"], sortedPages);
+  if (sortedPages['Error'] && sortedPages['Error'].length > 0) {
+    renderManualAssignmentUI(sortedPages['Error'], sortedPages);
   }
 
   wasmModule._clear_images();
