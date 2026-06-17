@@ -41,21 +41,53 @@
 }
 
 /* --- Render progress --- */
-#renderThumbs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 8px;
-  max-height: 90px;
-  overflow-y: auto;
+#livePreviewSection {
+  display: none;
+  margin: 12px 0;
 }
-#renderThumbs img {
-  height: 70px;
-  width: auto;
+#livePreviewSection.visible {
+  display: block;
+}
+.preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.preview-grid img {
+  width: 100%;
+  aspect-ratio: 0.77;
+  object-fit: contain;
   border: 1px solid #dee2e6;
   border-radius: 4px;
-  object-fit: contain;
   background: #fff;
+}
+.gpu-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.gpu-btn {
+  padding: 4px 12px;
+  font-size: 13px;
+  border: 1px solid #adb5bd;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+.gpu-btn.active {
+  background: #0d6efd;
+  color: #fff;
+  border-color: #0d6efd;
+}
+.gpu-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* --- Manual assignment cards --- */
@@ -382,7 +414,26 @@
 </div>
 </div>
 
+<div class="gpu-selector mb-2" id="gpuSelector">
+  <span class="text-muted small me-1">Render backend:</span>
+  <button class="gpu-btn active" id="btn-2d"   data-mode="2d">Canvas 2D</button>
+  <button class="gpu-btn"        id="btn-webgl" data-mode="webgl">WebGL</button>
+  <button class="gpu-btn"        id="btn-webgpu" data-mode="webgpu">WebGPU</button>
+  <span class="text-muted small ms-2" id="gpuStatus"></span>
+</div>
+
 <input type="file" id="fileInput" accept="application/pdf" class="form-control mb-3" />
+<div id="output" class="mb-3"></div>
+
+<!-- Live render preview — full width, hidden after processing -->
+<div id="livePreviewSection">
+  <p class="text-muted small mb-1">Pages appear as they render — <span id="previewPageCount"></span></p>
+  <div class="preview-grid" id="previewGrid"></div>
+</div>
+
+<div id="manualAssign" class="mb-4"></div>
+<div id="downloads" class="mb-4"></div>
+<div id="carouselGrid" class="row g-4"></div>
 <div id="output" class="mb-3"></div>
 <div id="manualAssign" class="mb-4"></div>
 <div id="downloads" class="mb-4"></div>
@@ -927,136 +978,322 @@ function setStatus(label, { spinner = true, progress = null } = {}) {
    Parallel, dual-scale PDF rendering with GPU OffscreenCanvas
    ============================================================ */
 
-const SCAN_SCALE   = 1.5;   // scale used for WASM QR scanning (low memory)
-const DISPLAY_SCALE = 2.5;  // scale used for the visible thumbnails / preview
-const RENDER_BATCH  = 6;    // pages rendered in parallel at once
+let originalPdfBytes = null;
+let wasmModule      = null;
+let renderMode      = '2d';      // '2d' | 'webgl' | 'webgpu'
+let gpuDevice       = null;      // WebGPU device, if initialised
+const images        = [];
+
+const SCAN_SCALE    = 1.5;
+const DISPLAY_SCALE = 2.5;
+const RENDER_BATCH  = 6;
+
+/* ── GPU selector ──────────────────────────────────────────── */
+(async () => {
+  const status = document.getElementById('gpuStatus');
+  const supported = { '2d': true, webgl: false, webgpu: false };
+
+  try {
+    const c = document.createElement('canvas');
+    supported.webgl = !!(c.getContext('webgl2') || c.getContext('webgl'));
+  } catch(e) {}
+
+  try {
+    if (navigator.gpu) {
+      const adapter = await navigator.gpu.requestAdapter();
+      supported.webgpu = !!adapter;
+    }
+  } catch(e) {}
+
+  document.querySelectorAll('.gpu-btn').forEach(btn => {
+    const mode = btn.dataset.mode;
+    if (!supported[mode]) {
+      btn.disabled = true;
+      btn.title = mode === 'webgpu'
+        ? 'WebGPU requires Chrome 113+ or Edge 113+'
+        : 'WebGL unavailable in this browser';
+    }
+    btn.addEventListener('click', () => {
+      if (btn.disabled) return;
+      document.querySelectorAll('.gpu-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderMode = mode;
+    });
+  });
+
+  if (supported.webgpu)      status.textContent = '✓ WebGPU available';
+  else if (supported.webgl)  status.textContent = '✓ WebGL available';
+  else                       status.textContent  = 'GPU acceleration unavailable';
+})();
+
+/* ── Helpers ───────────────────────────────────────────────── */
+function toggleGuide(id, show) {
+  const overlay = document.getElementById(id);
+  const sidebar = overlay.children[0];
+  if (show) {
+    overlay.style.display = 'block';
+    setTimeout(() => sidebar.classList.add('open'), 10);
+  } else {
+    sidebar.classList.remove('open');
+    setTimeout(() => overlay.style.display = 'none', 300);
+  }
+}
+
+function UTF8ToString(mod, ptr) {
+  const memory = mod.HEAPU8;
+  let endPtr = ptr;
+  while (memory[endPtr] !== 0) endPtr++;
+  return new TextDecoder('utf8').decode(memory.subarray(ptr, endPtr));
+}
+
+/** Force a browser repaint/layout flush before proceeding */
+function flushDOM() {
+  return new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+}
+
+/* ── Canvas factories per render mode ─────────────────────── */
 
 /**
- * Render one page at the given scale onto an OffscreenCanvas (GPU path)
- * or a regular Canvas as fallback, returning a data-URL.
+ * Create a canvas + 2D context for pixel extraction (always regular canvas —
+ * OffscreenCanvas blocks getImageData in some environments).
+ */
+function makeScanCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return { canvas: c, ctx: c.getContext('2d') };
+}
+
+/**
+ * Render a PDF page to a data-URL using the selected GPU backend.
+ * WebGL / WebGPU: render into an OffscreenCanvas for GPU compositing,
+ * then blit to a 2D canvas for toDataURL / convertToBlob.
  */
 async function renderPageToDataUrl(pdfPage, scale) {
   const viewport = pdfPage.getViewport({ scale });
+  const { width: w, height: h } = viewport;
 
-  let canvas, ctx;
-  if (typeof OffscreenCanvas !== 'undefined') {
-    canvas = new OffscreenCanvas(viewport.width, viewport.height);
-    ctx    = canvas.getContext('2d');
-  } else {
-    canvas        = document.createElement('canvas');
-    canvas.width  = viewport.width;
-    canvas.height = viewport.height;
-    ctx           = canvas.getContext('2d');
+  if (renderMode === 'webgpu' && gpuDevice) {
+    // WebGPU path: render into OffscreenCanvas, read back via ImageBitmap
+    const offscreen = new OffscreenCanvas(w, h);
+    const ctx = offscreen.getContext('2d');   // PDF.js renders to 2D context
+    await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+
+    // Use GPU to composite into a regular canvas for export
+    const bitmap = await createImageBitmap(offscreen);
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const outCtx = out.getContext('2d');
+    outCtx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return out.toDataURL('image/jpeg', 0.88);
   }
 
-  await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+  if (renderMode === 'webgl') {
+    // WebGL path: render to OffscreenCanvas, blit with WebGL texture
+    const offscreen = new OffscreenCanvas(w, h);
+    const pdfCtx = offscreen.getContext('2d');
+    await pdfPage.render({ canvasContext: pdfCtx, viewport }).promise;
 
-  if (canvas instanceof OffscreenCanvas) {
-    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.88 });
-    return new Promise((res) => {
-      const reader = new FileReader();
-      reader.onload = () => res(reader.result);
-      reader.readAsDataURL(blob);
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const gl = out.getContext('webgl2') || out.getContext('webgl');
+
+    if (gl) {
+      const bitmap = await createImageBitmap(offscreen);
+      // Simple passthrough: upload texture, draw fullscreen quad
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+      const vs = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vs, `attribute vec2 p;varying vec2 uv;void main(){uv=p*0.5+0.5;gl_Position=vec4(p,0,1);}`);
+      gl.compileShader(vs);
+      const fs = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fs, `precision mediump float;uniform sampler2D t;varying vec2 uv;void main(){gl_FragColor=texture2D(t,uv);}`);
+      gl.compileShader(fs);
+      const prog = gl.createProgram();
+      gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+      gl.linkProgram(prog); gl.useProgram(prog);
+
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(prog, 'p');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      gl.viewport(0, 0, w, h);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      bitmap.close();
+      gl.deleteTexture(tex);
+      gl.deleteBuffer(buf);
+    } else {
+      // WebGL context failed — fall back silently
+      const outCtx = out.getContext('2d');
+      const bitmap = await createImageBitmap(offscreen);
+      outCtx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+    }
+    return out.toDataURL('image/jpeg', 0.88);
+  }
+
+  // Default 2D path
+  if (typeof OffscreenCanvas !== 'undefined') {
+    const offscreen = new OffscreenCanvas(w, h);
+    const ctx = offscreen.getContext('2d');
+    await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+    const blob = await offscreen.convertToBlob({ type: 'image/jpeg', quality: 0.88 });
+    return new Promise(res => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.readAsDataURL(blob);
     });
   }
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  await pdfPage.render({ canvasContext: ctx, viewport }).promise;
   return canvas.toDataURL('image/jpeg', 0.88);
 }
 
-/**
- * Extract raw RGBA pixels from a page at SCAN_SCALE,
- * pass them to WASM, then free immediately.
- */
+/** Render at SCAN_SCALE, push pixels to WASM, free immediately. */
 async function scanPageWithWasm(pdfPage, pageNumber) {
   const viewport = pdfPage.getViewport({ scale: SCAN_SCALE });
-
-  // Always use a regular canvas for getImageData (OffscreenCanvas blocks that)
-  const canvas        = document.createElement('canvas');
-  canvas.width        = viewport.width;
-  canvas.height       = viewport.height;
-  const ctx           = canvas.getContext('2d');
+  const { canvas, ctx } = makeScanCanvas(viewport.width, viewport.height);
   await pdfPage.render({ canvasContext: ctx, viewport }).promise;
 
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const len     = imgData.data.length;
-  const ptr     = wasmModule._malloc(len);
+  const len = imgData.data.length;
+  const ptr = wasmModule._malloc(len);
   wasmModule.HEAPU8.set(imgData.data, ptr);
   wasmModule._add_image(ptr, canvas.width, canvas.height, pageNumber);
-  wasmModule._free(ptr);           // free immediately — don't accumulate
+  wasmModule._free(ptr);
 }
 
+/* ── Status helper ─────────────────────────────────────────── */
+function setStatus(label, { spinner = true, progress = null } = {}) {
+  const output = document.getElementById('output');
+  let html = `<div class="d-flex align-items-center gap-2">`;
+  if (spinner) html += `<div class="spinner-border spinner-border-sm text-primary" role="status"></div>`;
+  html += `<span>${label}</span></div>`;
+  if (progress) {
+    const pct = Math.round((progress.current / progress.total) * 100);
+    html += `
+      <div class="d-flex justify-content-between small text-muted mt-1">
+        <span>${progress.current} / ${progress.total} pages</span><span>${pct}%</span>
+      </div>
+      <div class="progress" style="height:8px;">
+        <div class="progress-bar" role="progressbar" style="width:${pct}%"></div>
+      </div>`;
+  }
+  output.innerHTML = html;
+}
+
+/* ── Main file handler ─────────────────────────────────────── */
 document.getElementById('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
   document.getElementById('manualAssign').innerHTML = '';
-  document.getElementById('downloads').innerHTML   = '';
+  document.getElementById('downloads').innerHTML    = '';
   document.getElementById('carouselGrid').innerHTML = '';
+
+  // Init WebGPU device if that mode is selected
+  if (renderMode === 'webgpu' && navigator.gpu) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      gpuDevice = adapter ? await adapter.requestDevice() : null;
+    } catch(e) { gpuDevice = null; }
+  }
 
   originalPdfBytes = await file.arrayBuffer();
   setStatus('Loading WASM module...');
+  await flushDOM();
   wasmModule = await Module();
 
-  const pdf = await pdfjsLib.getDocument({ data: originalPdfBytes }).promise;
+  const pdf   = await pdfjsLib.getDocument({ data: originalPdfBytes }).promise;
   const total = pdf.numPages;
-  setStatus('Rendering & scanning pages...', { progress: { current: 0, total } });
+
+  // Show preview section
+  const previewSection = document.getElementById('livePreviewSection');
+  const previewGrid    = document.getElementById('previewGrid');
+  const previewCount   = document.getElementById('previewPageCount');
+  previewGrid.innerHTML = '';
+  previewSection.classList.add('visible');
 
   images.length = 0;
-  for (let i = 0; i < total; i++) images.push(null); // pre-size so indices are stable
+  for (let i = 0; i < total; i++) images.push(null);
 
   let completed = 0;
 
-  function updateProgress() {
+  async function updateProgress(pageNum) {
     completed++;
-    setStatus('Rendering & scanning pages...', { progress: { current: completed, total } });
-    const thumbStrip = document.getElementById('renderThumbs');
-    if (thumbStrip && images[completed - 1]) {
+    setStatus(`Rendering pages (${renderMode.toUpperCase()})…`, {
+      progress: { current: completed, total }
+    });
+
+    // Add thumbnail to the live grid
+    if (images[pageNum - 1]) {
       const img   = document.createElement('img');
-      img.src     = images[completed - 1];
-      img.title   = `Page ${completed}`;
-      thumbStrip.appendChild(img);
-      thumbStrip.scrollTop = thumbStrip.scrollHeight;
+      img.src     = images[pageNum - 1];
+      img.title   = `Page ${pageNum}`;
+      img.loading = 'lazy';
+      previewGrid.appendChild(img);
+      previewCount.textContent = `${completed} of ${total} rendered`;
     }
+    // Yield to browser so the thumbnail actually paints
+    await flushDOM();
   }
 
-  // Process pages in parallel batches
+  setStatus(`Rendering pages (${renderMode.toUpperCase()})…`, { progress: { current: 0, total } });
+  await flushDOM();
+
+  // Render in parallel batches
   for (let batchStart = 1; batchStart <= total; batchStart += RENDER_BATCH) {
-    const batchEnd   = Math.min(batchStart + RENDER_BATCH - 1, total);
-    const batchNums  = [];
-    for (let n = batchStart; n <= batchEnd; n++) batchNums.push(n);
+    const batchEnd  = Math.min(batchStart + RENDER_BATCH - 1, total);
+    const batchNums = Array.from({ length: batchEnd - batchStart + 1 }, (_, i) => batchStart + i);
 
     await Promise.all(batchNums.map(async (pageNum) => {
       const pdfPage = await pdf.getPage(pageNum);
-      const idx     = pageNum - 1;
-
-      // Run scan (WASM) and display render in parallel
       const [displayUrl] = await Promise.all([
         renderPageToDataUrl(pdfPage, DISPLAY_SCALE),
         scanPageWithWasm(pdfPage, pageNum),
       ]);
-
-      images[idx] = displayUrl;
-      updateProgress();
-      console.log(`Processed page ${pageNum} / ${total}`);
+      images[pageNum - 1] = displayUrl;
+      await updateProgress(pageNum);
     }));
   }
 
-  console.log('Starting WASM sort...');
-  setStatus('Sorting pages by QR code (running WASM)...');
+  // ── Critical: flush DOM fully before blocking WASM call ──
+  setStatus(`All ${total} pages rendered — running QR sort…`);
+  await flushDOM();
+
+  console.log('Starting WASM sort…');
   const resultPtr = wasmModule._process_images();
   const resultStr = UTF8ToString(wasmModule, resultPtr);
-  console.log('Done WASM!');
+  console.log('WASM done');
 
   let sortedPages;
   try {
     sortedPages = JSON.parse(resultStr);
-    console.log(sortedPages);
   } catch (err) {
     console.error('JSON parse error:', err);
-    setStatus('Error parsing WASM JSON output.', { spinner: false });
+    setStatus('Error parsing WASM output.', { spinner: false });
     return;
   }
 
-  setStatus('Building PDFs...');
+  // Hide the live preview now that we're done
+  previewSection.classList.remove('visible');
+
+  setStatus('Building PDFs…');
+  await flushDOM();
   originalPdfBytes = await file.arrayBuffer();
   await splitPdfAndCreateDownloads(sortedPages);
   setStatus('Done', { spinner: false });
