@@ -40,6 +40,81 @@
     filter: invert(100%);
 }
 
+/* --- Render progress --- */
+#renderThumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  max-height: 90px;
+  overflow-y: auto;
+}
+#renderThumbs img {
+  height: 70px;
+  width: auto;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  object-fit: contain;
+  background: #fff;
+}
+
+/* --- Manual assignment cards --- */
+.unassigned-card.is-assigned {
+  opacity: 0.55;
+}
+.unassigned-card.is-removed {
+  opacity: 0.4;
+  filter: grayscale(1);
+}
+.unassigned-card .doc-name-input:focus {
+  outline: 2px solid #0d6efd;
+}
+.match-indicator {
+  min-height: 1.3em;
+  font-size: 0.85rem;
+  display: block;
+  margin-top: 2px;
+}
+.unassigned-thumb {
+  cursor: zoom-in;
+}
+
+/* --- Zoom modal --- */
+#zoomWrapper {
+  overflow: hidden;
+  max-height: 65vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #20232a;
+  touch-action: none;
+  position: relative;
+}
+#previewImage {
+  max-width: 100%;
+  max-height: 65vh;
+  transition: transform 0.04s linear;
+  user-select: none;
+}
+#zoomHint {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+#zoomControls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+
   </style>
 </head>
 <body class="container my-4">
@@ -309,6 +384,7 @@
 
 <input type="file" id="fileInput" accept="application/pdf" class="form-control mb-3" />
 <div id="output" class="mb-3"></div>
+<div id="manualAssign" class="mb-4"></div>
 <div id="downloads" class="mb-4"></div>
 <div id="carouselGrid" class="row g-4"></div>
 <!-- Image Preview Modal -->
@@ -316,14 +392,23 @@
   <div class="modal-dialog modal-xl modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header">
+        <span class="text-muted small">Scroll to zoom &middot; drag to pan &middot; double-click to reset</span>
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
       </div>
       <div class="modal-body p-0">
-        <img id="previewImage" class="img-fluid w-100" style="object-fit: contain;" />
+        <div id="zoomWrapper">
+          <span id="zoomHint">1.0&times;</span>
+          <div id="zoomControls">
+            <button type="button" class="btn btn-sm btn-light" id="zoomOutBtn">&minus;</button>
+            <button type="button" class="btn btn-sm btn-light" id="zoomResetBtn">Reset</button>
+            <button type="button" class="btn btn-sm btn-light" id="zoomInBtn">&plus;</button>
+          </div>
+          <img id="previewImage" />
+        </div>
         <div id="errorCorrection" class="position-sticky bottom-0 bg-light p-3 border-top">
             <div class="input-group">
-                <input type="text" class="form-control" id="correctionInput" placeholder="Type new name...">
-                <button class="btn btn-outline-primary" onclick="syncCorrectionInput()">Use</button>
+                <input type="text" class="form-control" id="correctionInput" placeholder="Type document name...">
+                <button class="btn btn-outline-primary" id="correctionUseBtn">Use &amp; Close</button>
             </div>
         </div>
       </div>
@@ -429,125 +514,235 @@ async function splitPdfAndCreateDownloads(sortedPages) {
     downloadsDiv.appendChild(a);
   });
 }
+/* ============================================================
+   Image zoom / pan modal
+   ============================================================ */
 let activeIndex = null;
-function showImageModal(index,imageSrc) {
+let zoomScale = 1, panX = 0, panY = 0, isDragging = false, dragStartX = 0, dragStartY = 0;
+let checkExistingMatch = () => {}; // reassigned inside renderManualAssignmentUI
+
+function applyZoomTransform() {
+  const img = document.getElementById('previewImage');
+  img.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomScale})`;
+  img.style.cursor = zoomScale > 1 ? 'grab' : 'zoom-in';
+  document.getElementById('zoomHint').textContent = `${zoomScale.toFixed(1)}\u00d7`;
+}
+
+function resetZoom() {
+  zoomScale = 1; panX = 0; panY = 0;
+  applyZoomTransform();
+}
+
+function setZoom(newScale) {
+  zoomScale = Math.min(6, Math.max(1, newScale));
+  if (zoomScale === 1) { panX = 0; panY = 0; }
+  applyZoomTransform();
+}
+
+function showImageModal(index, imageSrc) {
   activeIndex = index;
-  const existingInput = document.getElementById(`input-${index}`);
-  document.getElementById("correctionInput").value = existingInput ? existingInput.value : '';
+  const nameInput = document.getElementById(`name-${index}`);
+  document.getElementById("correctionInput").value = nameInput ? nameInput.value : '';
   document.getElementById("previewImage").src = imageSrc;
+  resetZoom();
   const modal = new bootstrap.Modal(document.getElementById('imagePreviewModal'));
   modal.show();
 }
-function syncCorrectionInput() {
+
+function syncCorrectionInput(closeModal = false) {
   const newValue = document.getElementById("correctionInput").value;
-
-    const inputEl = document.getElementById(`input-${activeIndex}`);
-    const selectEl = document.getElementById(`select-${activeIndex}`);
-
-  if (inputEl && selectEl) {
-    inputEl.value = newValue;
-    inputEl.style.display = 'block';     // Show the input (in case it's hidden)
-    selectEl.value = '_new';             // Mark select as "Create New"
+  const nameInput = document.getElementById(`name-${activeIndex}`);
+  if (nameInput) {
+    nameInput.value = newValue;
+    checkExistingMatch(activeIndex);
+  }
+  if (closeModal) {
+    bootstrap.Modal.getInstance(document.getElementById('imagePreviewModal'))?.hide();
+    if (nameInput) nameInput.focus();
   }
 }
 
+document.getElementById('correctionUseBtn').addEventListener('click', () => syncCorrectionInput(true));
+document.getElementById('correctionInput').addEventListener('input', () => syncCorrectionInput(false));
+document.getElementById('correctionInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); syncCorrectionInput(true); }
+});
 
-function assignPageToGroup(page, groupName, insertAtPageNumber = null) {
-  if (!sortedPages[groupName]) {
-    sortedPages[groupName] = [];
-  }
+const zoomWrapperEl = document.getElementById('zoomWrapper');
+zoomWrapperEl.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  setZoom(zoomScale + (e.deltaY < 0 ? 0.3 : -0.3));
+});
+document.getElementById('zoomInBtn').addEventListener('click', () => setZoom(zoomScale + 0.5));
+document.getElementById('zoomOutBtn').addEventListener('click', () => setZoom(zoomScale - 0.5));
+document.getElementById('zoomResetBtn').addEventListener('click', resetZoom);
 
-  // If user gave a position, insert it there
-  if (insertAtPageNumber && insertAtPageNumber > 0 && insertAtPageNumber <= sortedPages[groupName].length + 1) {
-    sortedPages[groupName].splice(insertAtPageNumber - 1, 0, page);
-  } else {
-    sortedPages[groupName].push(page);
-  }
+const previewImageEl = document.getElementById('previewImage');
+previewImageEl.addEventListener('dblclick', resetZoom);
+previewImageEl.addEventListener('mousedown', (e) => {
+  if (zoomScale <= 1) return;
+  isDragging = true;
+  dragStartX = e.clientX - panX;
+  dragStartY = e.clientY - panY;
+  previewImageEl.style.cursor = 'grabbing';
+  e.preventDefault();
+});
+window.addEventListener('mousemove', (e) => {
+  if (!isDragging) return;
+  panX = e.clientX - dragStartX;
+  panY = e.clientY - dragStartY;
+  applyZoomTransform();
+});
+window.addEventListener('mouseup', () => {
+  if (!isDragging) return;
+  isDragging = false;
+  previewImageEl.style.cursor = zoomScale > 1 ? 'grab' : 'zoom-in';
+});
 
-  renderManualAssignmentUI(); // Refresh
-}
-
-
+/* ============================================================
+   Manual assignment UI
+   ============================================================ */
 function renderManualAssignmentUI(errorPages, sortedPages) {
-  const output = document.getElementById('output');
+  const mount = document.getElementById('manualAssign');
+  mount.innerHTML = '';
+
   const container = document.createElement('div');
-  container.className = 'mt-4';
-  container.innerHTML = `<h3>Unassigned Pages</h3>`;
+  container.className = 'mt-2';
 
-  const assignments = {};
+  const assignments = {};        // docName -> [page, ...]
+  const assignedIndices = new Set();
+  const removedIndices = new Set();
 
-  errorPages.forEach((pageData, index) => {
-    const card = document.createElement('div');
-    card.className = 'card mb-3 bg-white text-dark';
-    card.innerHTML = `
-      <div class="row g-0">
-        <div class="col-md-4 text-center">
-          <img src="${images[pageData.foundpage]}" class="img-fluid rounded-start" style="max-height: 200px; object-fit: contain; cursor: zoom-in;" onclick="showImageModal(${index},'${images[pageData.foundpage]}')">
-        </div>
-        <div class="col-md-8">
-          <div class="card-body">
-            <h5 class="card-title">Page #${pageData.pageno}</h5>
-            <p class="card-text">No QR ID found. Assign to a document:</p>
+  const header = document.createElement('div');
+  header.className = 'd-flex justify-content-between align-items-center mb-2';
+  header.innerHTML = `<h3 class="mb-0">Unassigned Pages</h3><span id="unassignedCount" class="badge text-bg-secondary"></span>`;
+  container.appendChild(header);
+  container.insertAdjacentHTML('beforeend', '<p class="text-muted small">Type a document name below. Leaving the field shows whether it matches an existing document and how many pages it already has. Use &uarr;/&darr; to jump between pages, Tab to reach the page-number field, and Enter to confirm.</p>');
 
-            <label>Select existing or create new:</label>
-            <select class="form-select mb-2" id="select-${index}">
-              <option value="">-- Select Document --</option>
-              ${Object.keys(sortedPages).map(name => `<option value="${name}">${name}</option>`).join('')}
-              <option value="_new">[Create New]</option>
-            </select>
+  const datalist = document.createElement('datalist');
+  datalist.id = 'docNameOptions';
+  container.appendChild(datalist);
 
-            <input type="text" id="input-${index}" class="form-control mb-2" placeholder="New document name" style="display:none;">
-            <input type="number" min="1" class="form-control mb-2" id="pageno-${index}" placeholder="Insert at page (optional)">
+  function knownDocNames() {
+    const names = new Set(Object.keys(sortedPages).filter(n => n !== 'Error'));
+    Object.keys(assignments).forEach(n => names.add(n));
+    return names;
+  }
 
-            <button class="btn btn-sm btn-outline-primary" onclick="assignPage(${index})">Assign</button>
-          </div>
-        </div>
-      </div>
-    `;
-    container.appendChild(card);
+  function refreshDatalist() {
+    datalist.innerHTML = [...knownDocNames()].map(n => `<option value="${n}"></option>`).join('');
+  }
 
-    const select = card.querySelector(`#select-${index}`);
-    const input = card.querySelector(`#input-${index}`);
-
-    select.addEventListener('change', () => {
-      input.style.display = (select.value === '_new') ? 'block' : 'none';
-    });
-  });
-
-  const rerunBtn = document.createElement('button');
-  rerunBtn.className = 'btn btn-success mt-3';
-  rerunBtn.textContent = 'Re-run Split with Manual Assignments';
-  rerunBtn.onclick = async () => {
-    for (const docName in assignments) {
-      if (!sortedPages[docName]) sortedPages[docName] = [];
-      sortedPages[docName].push(...assignments[docName]);
+  function findExistingKey(val) {
+    const lower = val.toLowerCase();
+    for (const k of knownDocNames()) {
+      if (k.toLowerCase() === lower) return k;
     }
-    sortedPages["ErrorOld"] = sortedPages["Error"];
-    delete sortedPages["Error"];
-    await splitPdfAndCreateDownloads(sortedPages);
-    container.remove();
+    return null;
+  }
+
+  function existingCount(key) {
+    return (sortedPages[key] ? sortedPages[key].length : 0) + (assignments[key] ? assignments[key].length : 0);
+  }
+
+  function updateRemainingCount() {
+    const remaining = errorPages.length - assignedIndices.size - removedIndices.size;
+    document.getElementById('unassignedCount').textContent = `${remaining} remaining`;
+  }
+
+  function activeNameInputs() {
+    return [...container.querySelectorAll('.doc-name-input')].filter(el => !el.disabled);
+  }
+
+  checkExistingMatch = (index) => {
+    const nameInput = document.getElementById(`name-${index}`);
+    const matchSpan = document.getElementById(`match-${index}`);
+    const posInput = document.getElementById(`pos-${index}`);
+    if (!nameInput || !matchSpan || !posInput) return;
+    const val = nameInput.value.trim();
+    if (!val) { matchSpan.innerHTML = ''; posInput.placeholder = 'Insert at page (optional)'; return; }
+
+    const existingKey = findExistingKey(val);
+    if (existingKey) {
+      if (existingKey !== val) nameInput.value = existingKey; // normalise casing to the existing document
+      const count = existingCount(existingKey);
+      matchSpan.innerHTML = `<span class="text-success">&#10003; Existing document &mdash; ${count} page${count === 1 ? '' : 's'}</span>`;
+      if (!posInput.value) posInput.value = count + 1;
+      posInput.placeholder = `${count + 1} (end)`;
+    } else {
+      matchSpan.innerHTML = `<span class="text-muted">&#10010; New document</span>`;
+      posInput.placeholder = '1 (end)';
+    }
   };
 
-  container.appendChild(rerunBtn);
-  output.appendChild(container);
+  function focusNameInput(index) {
+    const el = document.getElementById(`name-${index}`);
+    if (el) { el.focus(); el.select(); }
+  }
 
-  window.assignPage = (index) => {
-    const select = document.getElementById(`select-${index}`);
-    const input = document.getElementById(`input-${index}`);
-    const pagenoInput = document.getElementById(`pageno-${index}`);
+  function navigateCards(fromIndex, direction) {
+    const inputs = activeNameInputs();
+    const ids = inputs.map(el => parseInt(el.id.replace('name-', ''), 10));
+    const pos = ids.indexOf(fromIndex);
+    if (pos === -1) return;
+    const nextPos = pos + direction;
+    if (nextPos >= 0 && nextPos < ids.length) focusNameInput(ids[nextPos]);
+  }
 
-    const docName = (select.value === '_new') ? input.value.trim() : select.value;
-    const insertPageNum = parseInt(pagenoInput.value);
+  function nextUnhandledIndex(afterIndex) {
+    const inputs = activeNameInputs();
+    const ids = inputs.map(el => parseInt(el.id.replace('name-', ''), 10));
+    const pos = ids.indexOf(afterIndex);
+    if (pos !== -1 && pos + 1 < ids.length) return ids[pos + 1];
+    const fallback = ids.find(id => id !== afterIndex);
+    return fallback === undefined ? null : fallback;
+  }
 
-    if (!docName) {
-      alert("Please enter or select a document name.");
-      return;
+  function setCardState(index, state) {
+    const card = document.getElementById(`card-${index}`);
+    const nameInput = document.getElementById(`name-${index}`);
+    const posInput = document.getElementById(`pos-${index}`);
+    const assignBtn = document.getElementById(`assign-${index}`);
+    const removeBtn = document.getElementById(`remove-${index}`);
+    const undoBtn = document.getElementById(`undo-${index}`);
+
+    card.classList.remove('is-assigned', 'is-removed', 'border-success', 'border-secondary');
+    card.querySelector('.status-label').textContent = '';
+    undoBtn.classList.add('d-none');
+    undoBtn.disabled = true;
+
+    if (state === 'assigned') {
+      card.classList.add('is-assigned', 'border-success');
+      card.querySelector('.status-label').textContent = 'Assigned';
+    } else if (state === 'removed') {
+      card.classList.add('is-removed', 'border-secondary');
+      card.querySelector('.status-label').textContent = 'Removed';
+      undoBtn.classList.remove('d-none');
+      undoBtn.disabled = false;
     }
 
-    if (!assignments[docName]) assignments[docName] = [];
+    [nameInput, posInput, assignBtn, removeBtn].forEach(el => { el.disabled = (state !== 'active'); });
+  }
 
-    const targetList = assignments[docName];
+  function assignCard(index) {
+    const nameInput = document.getElementById(`name-${index}`);
+    const posInput = document.getElementById(`pos-${index}`);
+    const docName = nameInput.value.trim();
+
+    if (!docName) {
+      nameInput.classList.add('is-invalid');
+      nameInput.focus();
+      return;
+    }
+    nameInput.classList.remove('is-invalid');
+
+    const next = nextUnhandledIndex(index); // capture before this card becomes inactive
+
+    const finalName = findExistingKey(docName) || docName;
+    if (!assignments[finalName]) assignments[finalName] = [];
+    const targetList = assignments[finalName];
     const page = errorPages[index];
+    const insertPageNum = parseInt(posInput.value, 10);
 
     if (insertPageNum > 0 && insertPageNum <= targetList.length + 1) {
       targetList.splice(insertPageNum - 1, 0, page);
@@ -555,24 +750,193 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
       targetList.push(page);
     }
 
-    select.disabled = true;
-    input.disabled = true;
-    pagenoInput.disabled = true;
-    select.nextElementSibling.nextElementSibling.nextElementSibling.disabled = true; // Disable Assign button
-    select.closest('.card').classList.add('border-success');
+    assignedIndices.add(index);
+    setCardState(index, 'assigned');
+    updateRemainingCount();
+    refreshDatalist();
+
+    if (next !== null) focusNameInput(next);
+  }
+
+  function removeCard(index) {
+    if (!confirm('Remove this page? It will be excluded from every output file.')) return;
+    const next = nextUnhandledIndex(index); // capture before this card becomes inactive
+    removedIndices.add(index);
+    setCardState(index, 'removed');
+    updateRemainingCount();
+    if (next !== null) focusNameInput(next);
+  }
+
+  function undoRemove(index) {
+    removedIndices.delete(index);
+    setCardState(index, 'active');
+    updateRemainingCount();
+    focusNameInput(index);
+  }
+
+  errorPages.forEach((pageData, index) => {
+    const card = document.createElement('div');
+    card.className = 'card mb-3 bg-white text-dark unassigned-card';
+    card.id = `card-${index}`;
+    card.innerHTML = `
+      <div class="row g-0">
+        <div class="col-md-4 text-center p-2">
+          <img src="${images[pageData.foundpage]}" class="img-fluid rounded unassigned-thumb" id="thumb-${index}" style="max-height: 200px; object-fit: contain;">
+        </div>
+        <div class="col-md-8">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start">
+              <h5 class="card-title mb-1">Page #${pageData.pageno}</h5>
+              <span class="status-label small text-success fw-semibold"></span>
+            </div>
+            <p class="card-text text-muted small mb-2">No QR ID found. Type a document name, or pick a match below.</p>
+
+            <label class="form-label small mb-0">Document name</label>
+            <input type="text" id="name-${index}" class="form-control doc-name-input mb-1" placeholder="Type to search or create..." list="docNameOptions" autocomplete="off">
+            <span class="match-indicator" id="match-${index}"></span>
+
+            <label class="form-label small mb-0 mt-2">Insert at page</label>
+            <input type="number" min="1" class="form-control mb-2" id="pos-${index}" placeholder="Insert at page (optional)">
+
+            <div class="d-flex gap-2">
+              <button class="btn btn-sm btn-outline-primary" id="assign-${index}">Assign</button>
+              <button class="btn btn-sm btn-outline-danger" id="remove-${index}">&#128465; Remove</button>
+              <button class="btn btn-sm btn-outline-secondary d-none" id="undo-${index}">Undo Remove</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    container.appendChild(card);
+
+    const nameInput = card.querySelector(`#name-${index}`);
+    const posInput = card.querySelector(`#pos-${index}`);
+    const thumb = card.querySelector(`#thumb-${index}`);
+
+    thumb.addEventListener('click', () => showImageModal(index, images[pageData.foundpage]));
+
+    nameInput.addEventListener('blur', () => checkExistingMatch(index));
+    nameInput.addEventListener('input', () => nameInput.classList.remove('is-invalid'));
+
+    nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); navigateCards(index, 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); navigateCards(index, -1); }
+      else if (e.key === 'Enter') { e.preventDefault(); checkExistingMatch(index); assignCard(index); }
+    });
+
+    posInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); assignCard(index); }
+    });
+
+    card.querySelector(`#assign-${index}`).addEventListener('click', () => assignCard(index));
+    card.querySelector(`#remove-${index}`).addEventListener('click', () => removeCard(index));
+    card.querySelector(`#undo-${index}`).addEventListener('click', () => undoRemove(index));
+  });
+
+  updateRemainingCount();
+
+  const actionsRow = document.createElement('div');
+  actionsRow.className = 'd-flex gap-2 mt-3 flex-wrap';
+
+  const downloadUnsortedBtn = document.createElement('button');
+  downloadUnsortedBtn.className = 'btn btn-outline-secondary';
+  downloadUnsortedBtn.textContent = 'Download Unsorted Pages';
+  downloadUnsortedBtn.title = 'Download a PDF of pages that are not yet assigned or removed';
+  downloadUnsortedBtn.onclick = async () => {
+    const remaining = errorPages.filter((_, i) => !assignedIndices.has(i) && !removedIndices.has(i));
+    if (remaining.length === 0) {
+      alert('No unsorted pages remain.');
+      return;
+    }
+    downloadUnsortedBtn.disabled = true;
+    downloadUnsortedBtn.textContent = 'Preparing...';
+    try {
+      const pdfDoc = await PDFLib.PDFDocument.load(originalPdfBytes);
+      const newPdfDoc = await PDFLib.PDFDocument.create();
+      for (const p of remaining) {
+        const [copiedPage] = await newPdfDoc.copyPages(pdfDoc, [p.foundpage]);
+        newPdfDoc.addPage(copiedPage);
+      }
+      const pdfBytes = await newPdfDoc.save();
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'Unsorted_Pages.pdf';
+      a.click();
+    } finally {
+      downloadUnsortedBtn.disabled = false;
+      downloadUnsortedBtn.textContent = 'Download Unsorted Pages';
+    }
   };
+
+  const rerunBtn = document.createElement('button');
+  rerunBtn.className = 'btn btn-success';
+  rerunBtn.textContent = 'Re-run Split with Manual Assignments';
+  rerunBtn.onclick = async () => {
+    for (const docName in assignments) {
+      if (!sortedPages[docName]) sortedPages[docName] = [];
+      sortedPages[docName].push(...assignments[docName]);
+    }
+    const stillUnsorted = errorPages.filter((_, i) => !assignedIndices.has(i) && !removedIndices.has(i));
+    if (stillUnsorted.length > 0) {
+      sortedPages['Unsorted'] = stillUnsorted;
+    }
+    delete sortedPages['Error'];
+    rerunBtn.disabled = true;
+    rerunBtn.textContent = 'Rebuilding...';
+    await splitPdfAndCreateDownloads(sortedPages);
+    mount.innerHTML = '';
+  };
+
+  actionsRow.appendChild(downloadUnsortedBtn); // appears before the re-run button, per the requested order
+  actionsRow.appendChild(rerunBtn);
+  container.appendChild(actionsRow);
+
+  mount.appendChild(container);
+  refreshDatalist();
+
+  // Kick off the keyboard-driven flow by focusing the first card right away.
+  const firstInput = activeNameInputs()[0];
+  if (firstInput) { firstInput.focus(); firstInput.select(); }
 }
 
+/* ============================================================
+   File processing: render -> WASM sort -> split
+   ============================================================ */
+function setStatus(label, { spinner = true, progress = null } = {}) {
+  const output = document.getElementById('output');
+  let html = `<div class="d-flex align-items-center gap-2">`;
+  if (spinner) html += `<div class="spinner-border spinner-border-sm text-primary" role="status"></div>`;
+  html += `<span>${label}</span></div>`;
+  if (progress) {
+    const pct = Math.round((progress.current / progress.total) * 100);
+    html += `
+      <div class="d-flex justify-content-between small text-muted mt-1">
+        <span>${progress.current} / ${progress.total} pages</span>
+        <span>${pct}%</span>
+      </div>
+      <div class="progress" style="height: 8px;">
+        <div class="progress-bar" role="progressbar" style="width: ${pct}%"></div>
+      </div>
+      <div id="renderThumbs"></div>`;
+  }
+  output.innerHTML = html;
+}
 
 document.getElementById('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+
+  document.getElementById('manualAssign').innerHTML = '';
+  document.getElementById('downloads').innerHTML = '';
+  document.getElementById('carouselGrid').innerHTML = '';
+
   originalPdfBytes = await file.arrayBuffer();
-  document.getElementById('output').textContent = 'Loading WASM module...';
+  setStatus('Loading WASM module...');
   wasmModule = await Module();
 
   const pdf = await pdfjsLib.getDocument({ data: originalPdfBytes }).promise;
-  document.getElementById('output').textContent = 'Rendering pages...';
+  setStatus('Rendering pages...', { progress: { current: 0, total: pdf.numPages } });
 
   images.length = 0;
 
@@ -590,29 +954,42 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
     const ptr = wasmModule._malloc(len);
     wasmModule.HEAPU8.set(imgData.data, ptr);
     wasmModule._add_image(ptr, canvas.width, canvas.height, i);
-    images.push(canvas.toDataURL());
+    const dataUrl = canvas.toDataURL();
+    images.push(dataUrl);
     wasmModule._free(ptr);
+
+    setStatus('Rendering pages...', { progress: { current: i, total: pdf.numPages } });
+    const thumbStrip = document.getElementById('renderThumbs');
+    if (thumbStrip) {
+      const thumbImg = document.createElement('img');
+      thumbImg.src = dataUrl;
+      thumbImg.title = `Page ${i}`;
+      thumbStrip.appendChild(thumbImg);
+      thumbStrip.scrollTop = thumbStrip.scrollHeight;
+    }
     console.log(`Rendered Image ${i} of ${pdf.numPages}`);
   }
+
   console.log('Starting WASM...');
-  document.getElementById('output').textContent = 'Processing in WASM...';
+  setStatus('Sorting pages by QR code (running WASM)...');
   const resultPtr = wasmModule._process_images();
   const resultStr = UTF8ToString(wasmModule, resultPtr);
-  console.log('Done WASM!')
-  document.getElementById('output').textContent = `Done`;
+  console.log('Done WASM!');
 
   let sortedPages;
   try {
     sortedPages = JSON.parse(resultStr);
     console.log(sortedPages);
-  } catch (e) {
-    console.error("JSON parse error:", e);
-    document.getElementById('output').textContent += "\n\nError parsing WASM JSON output.";
+  } catch (err) {
+    console.error("JSON parse error:", err);
+    setStatus('Error parsing WASM JSON output.', { spinner: false });
     return;
   }
 
+  setStatus('Building PDFs...');
   originalPdfBytes = await file.arrayBuffer();
   await splitPdfAndCreateDownloads(sortedPages);
+  setStatus('Done', { spinner: false });
 
   if (sortedPages["Error"] && sortedPages["Error"].length > 0) {
     renderManualAssignmentUI(sortedPages["Error"], sortedPages);
@@ -623,4 +1000,3 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
 </script>
 </body>
 </html>
-
