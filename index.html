@@ -125,7 +125,7 @@
 #previewImage {
   max-width: 100%;
   max-height: 65vh;
-  transition: transform 0.04s linear;
+  transition: transform 0.15s ease-out;
   user-select: none;
 }
 #zoomHint {
@@ -145,6 +145,65 @@
   right: 8px;
   display: flex;
   gap: 4px;
+}
+
+/* --- Animations --- */
+@keyframes thumbPopIn {
+  from { opacity: 0; transform: scale(0.85); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.preview-grid img {
+  animation: thumbPopIn 0.3s ease-out both;
+}
+
+@keyframes cardSlideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.unassigned-card {
+  animation: cardSlideIn 0.3s ease-out both;
+  transition: opacity 0.3s ease, filter 0.3s ease;
+}
+
+@keyframes flashSuccess {
+  0%   { background-color: #d1f7df; }
+  100% { background-color: transparent; }
+}
+@keyframes flashDanger {
+  0%   { background-color: #fde2e1; }
+  100% { background-color: transparent; }
+}
+.unassigned-card.flash-assigned { animation: flashSuccess 0.7s ease-out; }
+.unassigned-card.flash-removed  { animation: flashDanger 0.7s ease-out; }
+
+.progress-bar {
+  transition: width 0.35s ease;
+}
+
+.gpu-btn {
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+.gpu-btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.btn {
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background-color 0.15s ease;
+}
+.btn:active {
+  transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-grid img,
+  .unassigned-card,
+  .progress-bar,
+  .gpu-btn,
+  .btn,
+  #previewImage {
+    animation: none !important;
+    transition: none !important;
+  }
 }
 
   </style>
@@ -434,10 +493,6 @@
 <div id="manualAssign" class="mb-4"></div>
 <div id="downloads" class="mb-4"></div>
 <div id="carouselGrid" class="row g-4"></div>
-<div id="output" class="mb-3"></div>
-<div id="manualAssign" class="mb-4"></div>
-<div id="downloads" class="mb-4"></div>
-<div id="carouselGrid" class="row g-4"></div>
 <!-- Image Preview Modal -->
 <div class="modal fade" id="imagePreviewModal" tabindex="-1" aria-labelledby="imagePreviewLabel" aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-centered">
@@ -638,6 +693,7 @@ previewImageEl.addEventListener('mousedown', (e) => {
   isDragging = true;
   dragStartX = e.clientX - panX;
   dragStartY = e.clientY - panY;
+  previewImageEl.style.transition = 'none'; // instant tracking while dragging
   previewImageEl.style.cursor = 'grabbing';
   e.preventDefault();
 });
@@ -650,6 +706,7 @@ window.addEventListener('mousemove', (e) => {
 window.addEventListener('mouseup', () => {
   if (!isDragging) return;
   isDragging = false;
+  previewImageEl.style.transition = ''; // restore CSS transition for wheel/button zoom
   previewImageEl.style.cursor = zoomScale > 1 ? 'grab' : 'zoom-in';
 });
 
@@ -672,6 +729,12 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
   header.innerHTML = `<h3 class="mb-0">Unassigned Pages</h3><span id="unassignedCount" class="badge text-bg-secondary"></span>`;
   container.appendChild(header);
   container.insertAdjacentHTML('beforeend', '<p class="text-muted small">Type a document name below. Leaving the field shows whether it matches an existing document and how many pages it already has. Use &uarr;/&darr; to jump between pages, Tab to reach the page-number field, and Enter to confirm.</p>');
+
+  // Held directly rather than re-queried via document.getElementById, since this
+  // span lives inside `container` which isn't attached to the document until
+  // mount.appendChild(container) runs further down — an ID lookup before that
+  // point would always return null.
+  const unassignedCountEl = header.querySelector('#unassignedCount');
 
   const datalist = document.createElement('datalist');
   datalist.id = 'docNameOptions';
@@ -701,7 +764,7 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
 
   function updateRemainingCount() {
     const remaining = errorPages.length - assignedIndices.size - removedIndices.size;
-    document.getElementById('unassignedCount').textContent = `${remaining} remaining`;
+    unassignedCountEl.textContent = `${remaining} remaining`;
   }
 
   function activeNameInputs() {
@@ -760,16 +823,16 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
     const removeBtn = document.getElementById(`remove-${index}`);
     const undoBtn = document.getElementById(`undo-${index}`);
 
-    card.classList.remove('is-assigned', 'is-removed', 'border-success', 'border-secondary');
+    card.classList.remove('is-assigned', 'is-removed', 'border-success', 'border-secondary', 'flash-assigned', 'flash-removed');
     card.querySelector('.status-label').textContent = '';
     undoBtn.classList.add('d-none');
     undoBtn.disabled = true;
 
     if (state === 'assigned') {
-      card.classList.add('is-assigned', 'border-success');
+      card.classList.add('is-assigned', 'border-success', 'flash-assigned');
       card.querySelector('.status-label').textContent = 'Assigned';
     } else if (state === 'removed') {
-      card.classList.add('is-removed', 'border-secondary');
+      card.classList.add('is-removed', 'border-secondary', 'flash-removed');
       card.querySelector('.status-label').textContent = 'Removed';
       undoBtn.classList.remove('d-none');
       undoBtn.disabled = false;
@@ -832,6 +895,7 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
     const card = document.createElement('div');
     card.className = 'card mb-3 bg-white text-dark unassigned-card';
     card.id = `card-${index}`;
+    card.style.animationDelay = `${Math.min(index * 0.03, 0.5)}s`;
     card.innerHTML = `
       <div class="row g-0">
         <div class="col-md-4 text-center p-2">
@@ -957,25 +1021,6 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
 /* ============================================================
    File processing: render -> WASM sort -> split
    ============================================================ */
-function setStatus(label, { spinner = true, progress = null } = {}) {
-  const output = document.getElementById('output');
-  let html = `<div class="d-flex align-items-center gap-2">`;
-  if (spinner) html += `<div class="spinner-border spinner-border-sm text-primary" role="status"></div>`;
-  html += `<span>${label}</span></div>`;
-  if (progress) {
-    const pct = Math.round((progress.current / progress.total) * 100);
-    html += `
-      <div class="d-flex justify-content-between small text-muted mt-1">
-        <span>${progress.current} / ${progress.total} pages</span>
-        <span>${pct}%</span>
-      </div>
-      <div class="progress" style="height: 8px;">
-        <div class="progress-bar" role="progressbar" style="width: ${pct}%"></div>
-      </div>
-      <div id="renderThumbs"></div>`;
-  }
-  output.innerHTML = html;
-}
 
 /* ============================================================
    Parallel, dual-scale PDF rendering with GPU OffscreenCanvas
@@ -1157,20 +1202,41 @@ async function scanPageWithWasm(pdfPage, pageNumber) {
 /* ── Status helper ─────────────────────────────────────────── */
 function setStatus(label, { spinner = true, progress = null } = {}) {
   const output = document.getElementById('output');
-  let html = `<div class="d-flex align-items-center gap-2">`;
-  if (spinner) html += `<div class="spinner-border spinner-border-sm text-primary" role="status"></div>`;
-  html += `<span>${label}</span></div>`;
+  const labelEl = output.querySelector('.status-label-text');
+  const fillEl  = output.querySelector('.status-progress-fill');
+
+  // Rebuild from scratch only when the shape changes (spinner-only <-> with-progress).
+  // Otherwise reuse the existing nodes so width changes on .status-progress-fill
+  // are real transitions between two live states, not two unrelated elements.
+  const needsRebuild = !labelEl || (!!progress !== !!fillEl);
+
+  if (needsRebuild) {
+    let html = `<div class="d-flex align-items-center gap-2">`;
+    if (spinner) html += `<div class="spinner-border spinner-border-sm text-primary" role="status"></div>`;
+    html += `<span class="status-label-text"></span></div>`;
+    if (progress) {
+      html += `
+        <div class="d-flex justify-content-between small text-muted mt-1">
+          <span class="status-progress-text"></span><span class="status-progress-pct"></span>
+        </div>
+        <div class="progress" style="height:8px;">
+          <div class="progress-bar status-progress-fill" role="progressbar" style="width:0%"></div>
+        </div>`;
+    }
+    output.innerHTML = html;
+  }
+
+  output.querySelector('.status-label-text').textContent = label;
+
   if (progress) {
     const pct = Math.round((progress.current / progress.total) * 100);
-    html += `
-      <div class="d-flex justify-content-between small text-muted mt-1">
-        <span>${progress.current} / ${progress.total} pages</span><span>${pct}%</span>
-      </div>
-      <div class="progress" style="height:8px;">
-        <div class="progress-bar" role="progressbar" style="width:${pct}%"></div>
-      </div>`;
+    output.querySelector('.status-progress-text').textContent = `${progress.current} / ${progress.total} pages`;
+    output.querySelector('.status-progress-pct').textContent = `${pct}%`;
+    const fill = output.querySelector('.status-progress-fill');
+    // rAF lets the browser paint the bar's current width first, so the jump to
+    // the new width is an actual observed transition rather than an instant snap.
+    requestAnimationFrame(() => { fill.style.width = `${pct}%`; });
   }
-  output.innerHTML = html;
 }
 
 /* ── Main file handler ─────────────────────────────────────── */
