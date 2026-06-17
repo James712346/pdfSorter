@@ -680,6 +680,7 @@ async function splitPdfAndCreateDownloads(sortedPages) {
         </div>
         <div class="card-body text-center">
           <h5 class="card-title">${docName}</h5>
+          <p>Pages Used ${numPages}</p>
           <a class="btn btn-primary" download="${docName}.pdf" href="${URL.createObjectURL(blob)}">Download PDF</a>
         </div>
       </div>`;
