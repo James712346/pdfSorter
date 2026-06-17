@@ -1325,10 +1325,12 @@ const RENDER_BATCH  = 6;
   if (supported.webgpu){
     document.querySelectorAll('.gpu-btn').forEach(b => b.classList.remove('active'));
     document.getElementById('btn-webgpu').classList.add('active');
+    renderMode = document.getElementById('btn-webgpu').dataset.mode;
     status.textContent = '✓ WebGPU available';
   } else if (supported.webgl){ 
     document.querySelectorAll('.gpu-btn').forEach(b => b.classList.remove('active'));
     document.getElementById('btn-webgl').classList.add('active');
+    renderMode = document.getElementById('btn-webgpu').dataset.mode;
     status.textContent = '✓ WebGL available';
   }
   else {status.textContent  = 'GPU acceleration unavailable';}
