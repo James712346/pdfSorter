@@ -1322,9 +1322,16 @@ const RENDER_BATCH  = 6;
     });
   });
 
-  if (supported.webgpu)      status.textContent = '✓ WebGPU available';
-  else if (supported.webgl)  status.textContent = '✓ WebGL available';
-  else                       status.textContent  = 'GPU acceleration unavailable';
+  if (supported.webgpu){
+    document.querySelectorAll('.gpu-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('btn-webgpu').classList.add('active');
+    status.textContent = '✓ WebGPU available';
+  } else if (supported.webgl){ 
+    document.querySelectorAll('.gpu-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('btn-webgl').classList.add('active');
+    status.textContent = '✓ WebGL available';
+  }
+  else {status.textContent  = 'GPU acceleration unavailable';}
 })();
 
 
