@@ -146,6 +146,56 @@
   display: flex;
   gap: 4px;
 }
+#zoomSlide {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+#modalPositionIndicator {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: 2;
+}
+#zoomFinishScreen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(32, 35, 42, 0.96);
+  color: #fff;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+#zoomFinishScreen.visible {
+  opacity: 1;
+}
+.zoom-finish-check {
+  font-size: 3rem;
+  line-height: 1;
+  color: #4ade80;
+  animation: finishPop 0.4s ease-out;
+}
+.zoom-finish-text {
+  font-size: 1.05rem;
+  margin-top: 8px;
+}
+@keyframes finishPop {
+  from { transform: scale(0.5); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
 
 /* --- Animations --- */
 @keyframes thumbPopIn {
@@ -200,7 +250,10 @@
   .progress-bar,
   .gpu-btn,
   .btn,
-  #previewImage {
+  #previewImage,
+  #zoomSlide,
+  #zoomFinishScreen,
+  .zoom-finish-check {
     animation: none !important;
     transition: none !important;
   }
@@ -498,24 +551,45 @@
   <div class="modal-dialog modal-xl modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header">
-        <span class="text-muted small">Scroll to zoom &middot; drag to pan &middot; double-click to reset</span>
+        <span class="text-muted small">&larr;/&rarr; switch page &middot; Enter assigns &amp; advances &middot; Del removes (press twice) &middot; scroll to zoom &middot; drag to pan</span>
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
       </div>
       <div class="modal-body p-0">
         <div id="zoomWrapper">
           <span id="zoomHint">1.0&times;</span>
+          <span id="modalPositionIndicator"></span>
           <div id="zoomControls">
             <button type="button" class="btn btn-sm btn-light" id="zoomOutBtn">&minus;</button>
             <button type="button" class="btn btn-sm btn-light" id="zoomResetBtn">Reset</button>
             <button type="button" class="btn btn-sm btn-light" id="zoomInBtn">&plus;</button>
           </div>
-          <img id="previewImage" />
+          <div id="zoomSlide">
+            <img id="previewImage" />
+          </div>
+          <div id="zoomFinishScreen" class="d-none">
+            <div>
+              <div class="zoom-finish-check">&#10003;</div>
+              <div class="zoom-finish-text">All pages sorted!</div>
+            </div>
+          </div>
         </div>
         <div id="errorCorrection" class="position-sticky bottom-0 bg-light p-3 border-top">
-            <div class="input-group">
-                <input type="text" class="form-control" id="correctionInput" placeholder="Type document name...">
-                <button class="btn btn-outline-primary" id="correctionUseBtn">Use &amp; Close</button>
+          <div class="d-flex justify-content-between align-items-center">
+            <label class="form-label small mb-0" for="correctionInput">Document name</label>
+            <span class="match-indicator" id="modalMatchIndicator"></span>
+          </div>
+          <input type="text" class="form-control mb-2" id="correctionInput" placeholder="Type document name..." list="docNameOptions" autocomplete="off">
+          <div class="row g-2 align-items-end">
+            <div class="col">
+              <label class="form-label small mb-0" for="modalPosInput">Insert at page</label>
+              <input type="number" min="1" class="form-control" id="modalPosInput" placeholder="Insert at page (optional)">
             </div>
+            <div class="col-auto d-flex gap-2">
+              <button class="btn btn-outline-danger" id="modalDeleteBtn" title="Press once to arm, again (or hit Delete twice) to confirm">&#128465; Delete</button>
+              <button class="btn btn-primary" id="correctionUseBtn">Assign &amp; Next &#8629;</button>
+            </div>
+          </div>
+          <div id="modalDeleteHint" class="small text-danger mt-1"></div>
         </div>
       </div>
     </div>
@@ -628,7 +702,15 @@ async function splitPdfAndCreateDownloads(sortedPages) {
    ============================================================ */
 let activeIndex = null;
 let zoomScale = 1, panX = 0, panY = 0, isDragging = false, dragStartX = 0, dragStartY = 0;
-let checkExistingMatch = () => {}; // reassigned inside renderManualAssignmentUI
+let checkExistingMatch = () => {};          // reassigned inside renderManualAssignmentUI
+let activeErrorPages = [];                  // mirror of errorPages — reassigned inside renderManualAssignmentUI
+let modalNeighborIndex = () => null;        // (index, direction) => index|null — arrow-key browsing among active cards
+let modalAssignCard = () => false;          // (index) => nextIndex|null|false — assign current card, skip background focus
+let modalRemoveCardImmediate = () => null;  // (index) => nextIndex|null — remove current card, skip background focus
+let modalActivePosition = () => ({ pos: null, total: 0 }); // (index) => {pos, total} for the "3 of 12" indicator
+let modalTransitioning = false;
+let pendingDeleteConfirm = false;
+let pendingDeleteTimeout = null;
 
 function applyZoomTransform() {
   const img = document.getElementById('previewImage');
@@ -648,33 +730,167 @@ function setZoom(newScale) {
   applyZoomTransform();
 }
 
-function showImageModal(index, imageSrc) {
+/** Pull a card's current name/page-number into the modal fields and show its image. */
+function loadCardIntoModal(index) {
   activeIndex = index;
+  const pageData = activeErrorPages[index];
   const nameInput = document.getElementById(`name-${index}`);
-  document.getElementById("correctionInput").value = nameInput ? nameInput.value : '';
-  document.getElementById("previewImage").src = imageSrc;
+  const posInput = document.getElementById(`pos-${index}`);
+
+  document.getElementById('correctionInput').value = nameInput ? nameInput.value : '';
+  document.getElementById('correctionInput').classList.remove('is-invalid');
+  document.getElementById('modalPosInput').value = posInput ? posInput.value : '';
+  document.getElementById('previewImage').src = images[pageData.foundpage];
+
+  document.getElementById('zoomFinishScreen').classList.remove('visible');
+  document.getElementById('zoomFinishScreen').classList.add('d-none');
+
+  pendingDeleteConfirm = false;
+  clearTimeout(pendingDeleteTimeout);
+  document.getElementById('modalDeleteHint').textContent = '';
+
   resetZoom();
-  const modal = new bootstrap.Modal(document.getElementById('imagePreviewModal'));
-  modal.show();
+  updateModalPositionIndicator();
+  checkExistingMatch(index); // populate the modal's match indicator/placeholder right away
 }
 
-function syncCorrectionInput(closeModal = false) {
-  const newValue = document.getElementById("correctionInput").value;
+function updateModalPositionIndicator() {
+  const indicator = document.getElementById('modalPositionIndicator');
+  const pageData = activeErrorPages[activeIndex];
+  const { pos, total } = modalActivePosition(activeIndex);
+  indicator.textContent = pos !== null
+    ? `Page #${pageData.pageno} — ${pos} of ${total} unsorted`
+    : `Page #${pageData.pageno}`;
+}
+
+/** Write the modal's name/page-number fields back into the underlying card's inputs. */
+function syncModalFieldsToCard(index) {
+  const nameInput = document.getElementById(`name-${index}`);
+  const posInput = document.getElementById(`pos-${index}`);
+  if (nameInput) nameInput.value = document.getElementById('correctionInput').value;
+  if (posInput) posInput.value = document.getElementById('modalPosInput').value;
+}
+
+/** Swipe to a new card. direction > 0 slides as "forward" (next), < 0 as "back" (previous). */
+function slideAndShow(newIndex, direction) {
+  if (newIndex === null) { showFinishScreen(); return; }
+  if (modalTransitioning) return;
+  modalTransitioning = true;
+
+  const slideEl = document.getElementById('zoomSlide');
+  const exitOffset = direction > 0 ? -70 : 70;
+
+  slideEl.style.transition = 'transform 0.15s ease, opacity 0.15s ease';
+  slideEl.style.transform = `translateX(${exitOffset}px)`;
+  slideEl.style.opacity = '0';
+
+  setTimeout(() => {
+    loadCardIntoModal(newIndex);
+    slideEl.style.transition = 'none';
+    slideEl.style.transform = `translateX(${-exitOffset}px)`;
+    requestAnimationFrame(() => {
+      slideEl.style.transition = 'transform 0.15s ease, opacity 0.15s ease';
+      slideEl.style.transform = 'translateX(0)';
+      slideEl.style.opacity = '1';
+      setTimeout(() => { modalTransitioning = false; }, 160);
+    });
+  }, 150);
+}
+
+function showFinishScreen() {
+  const finishEl = document.getElementById('zoomFinishScreen');
+  document.getElementById('modalPositionIndicator').textContent = '';
+  finishEl.classList.remove('d-none');
+  requestAnimationFrame(() => finishEl.classList.add('visible'));
+  setTimeout(() => {
+    bootstrap.Modal.getInstance(document.getElementById('imagePreviewModal'))?.hide();
+  }, 2000);
+}
+
+/** ArrowLeft/ArrowRight — browse among currently-active (unhandled) cards without changing them. */
+function navigateModal(direction) {
+  if (activeIndex === null || modalTransitioning) return;
+  const next = modalNeighborIndex(activeIndex, direction);
+  if (next === null) return; // already at the end in that direction — no-op, no finish screen
+  slideAndShow(next, direction);
+}
+
+/** Enter — assign the current card using the modal's fields, then advance to the next one. */
+function performModalAssign() {
+  if (activeIndex === null || modalTransitioning) return;
+  syncModalFieldsToCard(activeIndex);
+  const result = modalAssignCard(activeIndex);
+  if (result === false) {
+    document.getElementById('correctionInput').classList.add('is-invalid');
+    document.getElementById('correctionInput').focus();
+    return;
+  }
+  slideAndShow(result, 1);
+}
+
+/** Delete key / Delete button — first press arms a confirmation, second press within the window removes. */
+function armOrConfirmDelete() {
+  if (activeIndex === null || modalTransitioning) return;
+  const hint = document.getElementById('modalDeleteHint');
+  if (!pendingDeleteConfirm) {
+    pendingDeleteConfirm = true;
+    hint.textContent = 'Press Delete again (or click Delete again) to remove this page.';
+    clearTimeout(pendingDeleteTimeout);
+    pendingDeleteTimeout = setTimeout(() => {
+      pendingDeleteConfirm = false;
+      hint.textContent = '';
+    }, 3000);
+  } else {
+    clearTimeout(pendingDeleteTimeout);
+    pendingDeleteConfirm = false;
+    hint.textContent = '';
+    const result = modalRemoveCardImmediate(activeIndex);
+    slideAndShow(result, 1);
+  }
+}
+
+function showImageModal(index) {
+  loadCardIntoModal(index);
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('imagePreviewModal')).show();
+}
+
+const imagePreviewModalEl = document.getElementById('imagePreviewModal');
+
+imagePreviewModalEl.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight') { e.preventDefault(); navigateModal(1); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); navigateModal(-1); }
+  else if (e.key === 'Enter') { e.preventDefault(); performModalAssign(); }
+  else if (e.key === 'Delete') { e.preventDefault(); armOrConfirmDelete(); }
+});
+
+imagePreviewModalEl.addEventListener('hidden.bs.modal', () => {
+  pendingDeleteConfirm = false;
+  clearTimeout(pendingDeleteTimeout);
+  document.getElementById('modalDeleteHint').textContent = '';
+  modalTransitioning = false;
+  const slideEl = document.getElementById('zoomSlide');
+  slideEl.style.transition = '';
+  slideEl.style.transform = '';
+  slideEl.style.opacity = '';
+  document.getElementById('zoomFinishScreen').classList.remove('visible');
+  document.getElementById('zoomFinishScreen').classList.add('d-none');
+});
+
+document.getElementById('correctionUseBtn').addEventListener('click', performModalAssign);
+document.getElementById('modalDeleteBtn').addEventListener('click', armOrConfirmDelete);
+
+document.getElementById('correctionInput').addEventListener('input', () => {
   const nameInput = document.getElementById(`name-${activeIndex}`);
   if (nameInput) {
-    nameInput.value = newValue;
+    nameInput.value = document.getElementById('correctionInput').value;
     checkExistingMatch(activeIndex);
   }
-  if (closeModal) {
-    bootstrap.Modal.getInstance(document.getElementById('imagePreviewModal'))?.hide();
-    if (nameInput) nameInput.focus();
-  }
-}
+  document.getElementById('correctionInput').classList.remove('is-invalid');
+});
 
-document.getElementById('correctionUseBtn').addEventListener('click', () => syncCorrectionInput(true));
-document.getElementById('correctionInput').addEventListener('input', () => syncCorrectionInput(false));
-document.getElementById('correctionInput').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); syncCorrectionInput(true); }
+document.getElementById('modalPosInput').addEventListener('input', () => {
+  const posInput = document.getElementById(`pos-${activeIndex}`);
+  if (posInput) posInput.value = document.getElementById('modalPosInput').value;
 });
 
 const zoomWrapperEl = document.getElementById('zoomWrapper');
@@ -771,25 +987,50 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
     return [...container.querySelectorAll('.doc-name-input')].filter(el => !el.disabled);
   }
 
+  activeErrorPages = errorPages;
+  modalNeighborIndex = unhandledNeighborIndex;
+  modalAssignCard = (index) => assignCard(index, { focusMain: false });
+  modalRemoveCardImmediate = (index) => removeCardImmediate(index, { focusMain: false });
+  modalActivePosition = (index) => {
+    const ids = activeNameInputs().map(el => parseInt(el.id.replace('name-', ''), 10));
+    const pos = ids.indexOf(index);
+    return { pos: pos === -1 ? null : pos + 1, total: ids.length };
+  };
+
   checkExistingMatch = (index) => {
     const nameInput = document.getElementById(`name-${index}`);
     const matchSpan = document.getElementById(`match-${index}`);
     const posInput = document.getElementById(`pos-${index}`);
     if (!nameInput || !matchSpan || !posInput) return;
     const val = nameInput.value.trim();
-    if (!val) { matchSpan.innerHTML = ''; posInput.placeholder = 'Insert at page (optional)'; return; }
+    const modalMatchSpan = (index === activeIndex) ? document.getElementById('modalMatchIndicator') : null;
+    const modalPosInput  = (index === activeIndex) ? document.getElementById('modalPosInput') : null;
+
+    if (!val) {
+      matchSpan.innerHTML = '';
+      posInput.placeholder = 'Insert at page (optional)';
+      if (modalMatchSpan) modalMatchSpan.innerHTML = '';
+      if (modalPosInput) modalPosInput.placeholder = 'Insert at page (optional)';
+      return;
+    }
 
     const existingKey = findExistingKey(val);
+    let html;
     if (existingKey) {
       if (existingKey !== val) nameInput.value = existingKey; // normalise casing to the existing document
       const count = existingCount(existingKey);
-      matchSpan.innerHTML = `<span class="text-success">&#10003; Existing document &mdash; ${count} page${count === 1 ? '' : 's'}</span>`;
+      html = `<span class="text-success">&#10003; Existing document &mdash; ${count} page${count === 1 ? '' : 's'}</span>`;
       if (!posInput.value) posInput.value = count + 1;
       posInput.placeholder = `${count + 1} (end)`;
+      if (modalPosInput && !modalPosInput.value) modalPosInput.value = count + 1;
+      if (modalPosInput) modalPosInput.placeholder = `${count + 1} (end)`;
     } else {
-      matchSpan.innerHTML = `<span class="text-muted">&#10010; New document</span>`;
+      html = `<span class="text-muted">&#10010; New document</span>`;
       posInput.placeholder = '1 (end)';
+      if (modalPosInput) modalPosInput.placeholder = '1 (end)';
     }
+    matchSpan.innerHTML = html;
+    if (modalMatchSpan) modalMatchSpan.innerHTML = html;
   };
 
   function focusNameInput(index) {
@@ -813,6 +1054,18 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
     if (pos !== -1 && pos + 1 < ids.length) return ids[pos + 1];
     const fallback = ids.find(id => id !== afterIndex);
     return fallback === undefined ? null : fallback;
+  }
+
+  /** Strict neighbor among currently-active cards, for arrow-key browsing in the modal.
+   *  Unlike nextUnhandledIndex, this returns null at either end instead of falling back. */
+  function unhandledNeighborIndex(fromIndex, direction) {
+    const ids = activeNameInputs().map(el => parseInt(el.id.replace('name-', ''), 10));
+    const pos = ids.indexOf(fromIndex);
+    if (pos === -1) {
+      return direction > 0 ? (ids[0] ?? null) : (ids[ids.length - 1] ?? null);
+    }
+    const nextPos = pos + direction;
+    return (nextPos >= 0 && nextPos < ids.length) ? ids[nextPos] : null;
   }
 
   function setCardState(index, state) {
@@ -841,15 +1094,15 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
     [nameInput, posInput, assignBtn, removeBtn].forEach(el => { el.disabled = (state !== 'active'); });
   }
 
-  function assignCard(index) {
+  function assignCard(index, { focusMain = true } = {}) {
     const nameInput = document.getElementById(`name-${index}`);
     const posInput = document.getElementById(`pos-${index}`);
     const docName = nameInput.value.trim();
 
     if (!docName) {
       nameInput.classList.add('is-invalid');
-      nameInput.focus();
-      return;
+      if (focusMain) nameInput.focus();
+      return false; // validation failed — caller should not advance
     }
     nameInput.classList.remove('is-invalid');
 
@@ -872,16 +1125,22 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
     updateRemainingCount();
     refreshDatalist();
 
-    if (next !== null) focusNameInput(next);
+    if (focusMain && next !== null) focusNameInput(next);
+    return next; // index of next unhandled card, or null if none remain
   }
 
-  function removeCard(index) {
-    if (!confirm('Remove this page? It will be excluded from every output file.')) return;
+  function removeCardImmediate(index, { focusMain = true } = {}) {
     const next = nextUnhandledIndex(index); // capture before this card becomes inactive
     removedIndices.add(index);
     setCardState(index, 'removed');
     updateRemainingCount();
-    if (next !== null) focusNameInput(next);
+    if (focusMain && next !== null) focusNameInput(next);
+    return next;
+  }
+
+  function removeCard(index) {
+    if (!confirm('Remove this page? It will be excluded from every output file.')) return;
+    removeCardImmediate(index);
   }
 
   function undoRemove(index) {
@@ -931,7 +1190,7 @@ function renderManualAssignmentUI(errorPages, sortedPages) {
     const posInput = card.querySelector(`#pos-${index}`);
     const thumb = card.querySelector(`#thumb-${index}`);
 
-    thumb.addEventListener('click', () => showImageModal(index, images[pageData.foundpage]));
+    thumb.addEventListener('click', () => showImageModal(index));
 
     nameInput.addEventListener('blur', () => checkExistingMatch(index));
     nameInput.addEventListener('input', () => nameInput.classList.remove('is-invalid'));
